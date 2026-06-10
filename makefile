@@ -46,4 +46,9 @@ $(BUILD_DIR)/%.o: %.cpp
 clean:
 	rm -rf $(BUILD_DIR)
 
+push:
+	git push origin master && git push github master
+
+commit:
+	git add . && git commit
 .PHONY: all clean
