@@ -21,6 +21,7 @@ TARGET = $(BUILD_DIR)/ChatServer
 SRCS = ChatServer.cpp \
        network/ChatServerListener.cpp \
        network/ChatServerWorker.cpp \
+       network/ChatServerUploadWorker.cpp \
        sql/SQL.cpp \
        sql/SQLPool.cpp \
        global/GlobalVar.cpp \

@@ -1,7 +1,10 @@
 #include "ChatServerWorker.h"
+#include <algorithm>
 #include <bits/types/struct_timeval.h>
 #include <cstring>
+#include <event2/bufferevent.h>
 #include <event2/event.h>
+#include <event2/util.h>
 #include <functional>
 #include <memory>
 #include <sodium/core.h>
@@ -225,6 +228,26 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
     else if(type == "Send")
 	//send handle
 	;
+    else if(type == "Update_Avatar")
+    {
+	if(!j.contains("Url") || !j["Url"].is_string())
+	{
+	    logger.warn("Json no Url");
+	    return;
+	}
+	handleUploadAvatar(sess, j.value("Url", ""), requests_id.str());
+    }
+    else if(type == "UnLogin")
+	handleUnLogin(sess, requests_id.str());
+    else if(type == "UpdateUsername")
+    {
+	if(!j.contains("Username") || !j["Username"].is_string())
+	{
+	    logger.warn("Json no Username");
+	    return;
+	}
+	handleUpdateUsername(sess, j.value("Username", ""), requests_id.str());
+    }
     else
     {
 	logger.warn("Pack Type Error");
@@ -260,9 +283,6 @@ void ChatServerWorker::handleHeartbeat(bufferevent* bev, const std::string reque
     j["Type"] = "HeartbeatResp";
     std::string data = j.dump() + '\n';
     bufferevent_write(bev, data.c_str(), data.size());
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
-    std::cout << "当前时间: " << std::put_time(std::localtime(&now_c), "%Y-%m-%d %H:%M:%S") << std::endl;
 }
 
 void ChatServerWorker::handleLogin(session* sess, std::string email, std::string password, const std::string requests_id)
@@ -280,8 +300,8 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 
 	//global 
 	std::string g_username;
-	int64_t g_uid;
-	int64_t g_sid;
+	std::string g_uid;
+	std::string g_sid;
 	std::string g_avatar_url;
 
 	//判断合规性
@@ -333,8 +353,8 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 		    logger.error(e.what());
 		    return;
 		}
-		g_uid = uid;
-		g_sid = sid;
+		g_uid = std::to_string(uid);
+		g_sid = std::to_string(sid);
 		g_username = std::string(buf_username, len_username);
 		g_avatar_url = std::string(buf_avatar, len_avatar);
 
@@ -519,6 +539,132 @@ void ChatServerWorker::handleRegister(session* sess, std::string email, std::str
 void ChatServerWorker::handleSend(bufferevent* bev, const std::string requests_id)
 {}
 
+void ChatServerWorker::handleUploadAvatar(session* sess, std::string url, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([sessPtr, url = std::move(url), requests_id](){
+	bool result = false;
+	if(sessPtr->uid.has_value())
+	{
+	    SQL* con = SQLPool::getSQLPool()->getConn();
+	    std::string sql = "SELECT avatar_url FROM user WHERE snowid = ?;";
+	    MYSQL_BIND bind_param;
+	    int64_t uid;
+	    uid = sessPtr->uid.value();
+
+	    initLongLongParam(&bind_param, &uid, sizeof(uid));
+
+	    MYSQL_BIND bind_result;
+	    char buf_avatar[512];
+	    unsigned long len_avatar = 0;
+	    initStringParam(&bind_result, buf_avatar, sizeof(buf_avatar), &len_avatar);
+	    con->executeSql(sql, &bind_param, &bind_result);
+	    std::string old_avatarURL;
+	    if(con->nextData() >= 0)
+	    {
+		old_avatarURL = std::string(buf_avatar, len_avatar);
+	    }
+	    SQLPool::getSQLPool()->backConn(con);
+
+	    SQL* con1 = SQLPool::getSQLPool()->getConn();
+	    sql = "UPDATE user SET avatar_url = ? WHERE snowid = ?;";
+	    MYSQL_BIND bind_param1[2];
+
+	    unsigned long len_url = url.size();
+	    initStringParam(&bind_param1[0], (char*)url.data(), url.size(), &len_url);
+	    initLongLongParam(&bind_param1[1], &uid, sizeof(uid)); 
+	    if(!con1->executeSql(sql, bind_param1))
+		std::cout << con1->getSQLError() << "\n";
+
+	    if(con1->getAffectRows() > 0)
+	    {
+		result = true;
+	    }
+	    std::string delete_avatar(buf_avatar, len_avatar);
+	    size_t pos_up = delete_avatar.find("/upload/");
+	    if(pos_up != std::string::npos)
+	    {
+		std::string delete_path = "." + delete_avatar.substr(pos_up);
+		std::ifstream ifs(delete_path);
+		if(ifs.is_open())
+		{
+		    ifs.close();
+		    std::remove(delete_path.c_str());
+		}
+		else
+		    ifs.close();
+	    }
+	}
+	//send back base and send json
+	auto* func = new std::function<void()>([result, requests_id, sessPtr](){
+	    json j;
+	    j["Requests_id"] = requests_id;
+	    j["Type"] = "UpdateAvatarResp";
+	    j["Result"] = result;
+	    std::string data = j.dump() + "\n";
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	});
+
+	    timeval tv = {0,0};
+	    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	    }, func, &tv);
+    });
+
+}
+
+void ChatServerWorker::handleUnLogin(session* sess, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    json j;
+    j["Requests_id"] = requests_id;
+    j["Type"] = "UnLoginResp";
+    std::string data = j.dump() + "\n";
+    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+    if(sessPtr->uid.has_value())
+	onlineUser.erase(sessPtr->uid.value());
+    sessPtr->uid.reset();
+}
+
+void ChatServerWorker::handleUpdateUsername(session* sess, std::string username, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([sessPtr, username, requests_id](){
+	bool result = false;
+	if(sessPtr->uid.has_value() && !username.empty())
+	{
+	    SQL* con = SQLPool::getSQLPool()->getConn();
+	    std::string sql = "Update user SET username = ? WHERE snowid = ?;";
+	    MYSQL_BIND bind_param[2];
+	    unsigned long len_username = username.size();
+	    initStringParam(&bind_param[0], (char*)username.data(), username.size(), &len_username);
+	    int64_t uid = sessPtr->uid.value();	
+	    initLongLongParam(&bind_param[1], &uid, sizeof(uid));
+
+	    con->executeSql(sql, bind_param);
+	    if(con->getAffectRows() > 0)
+		result = true;
+	}
+	auto* func = new std::function<void()>([sessPtr, result, requests_id](){
+	    json j;
+	    j["Requests_id"] = requests_id;
+	    j["Type"] = "UpdateUsernameResp";
+	    j["Result"] = result;
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	});
+	timeval tv{0, 0};
+	event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	    auto* func = static_cast<std::function<void()>*>(arg);
+	    (*func)();
+	    delete func;
+	}, func, &tv);
+    });
+}
+
 bool ChatServerWorker::isEmail(const std::string& email)
 {
     std::regex email_pattern(R"(^[0-9a-zA-Z._%+-]+@[0-9a-zA-Z.-]+\.[a-zA-Z]{2,}$)");
@@ -548,6 +694,7 @@ bool ChatServerWorker::verify_password(const std::string& password, const std::s
 
 void ChatServerWorker::initStringParam(MYSQL_BIND* pargma, char* buf_string, size_t buffer_length, unsigned long* length)
 {
+    memset(pargma, 0, sizeof(*pargma));
     pargma->buffer_type = MYSQL_TYPE_STRING;
     pargma->buffer = buf_string;
     pargma->buffer_length = buffer_length;
@@ -557,6 +704,7 @@ void ChatServerWorker::initStringParam(MYSQL_BIND* pargma, char* buf_string, siz
 
 void ChatServerWorker::initLongLongParam(MYSQL_BIND* pargma, int64_t* buf_longlong, size_t buffer_length)
 {
+    memset(pargma, 0, sizeof(*pargma));
     pargma->buffer_type = MYSQL_TYPE_LONGLONG;
     pargma->buffer = buf_longlong;
     pargma->buffer_length = buffer_length;

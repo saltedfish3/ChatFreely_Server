@@ -2,7 +2,7 @@
 
 Logger ChatServerListener::logger("listener");
 
-ChatServerListener::ChatServerListener(unsigned short port,int workerNum)
+ChatServerListener::ChatServerListener(unsigned short port,int workerNum, int uploadWorkerNum)
     :count(0)
 {
     this->base = event_base_new();
@@ -56,16 +56,24 @@ ChatServerListener::ChatServerListener(unsigned short port,int workerNum)
 	logger.error(e.what());
 	exit(1);
     }
+
+    this->list_UploadWorker.reserve(uploadWorkerNum>0?uploadWorkerNum:1);
+    for(int i = 0; i < (uploadWorkerNum>0?uploadWorkerNum:0); i++)
+    {
+	auto worker = std::make_unique<ChatServerUploadWorker>();
+	worker->run();
+	this->list_UploadWorker.emplace_back(std::move(worker));
+    }
 }
 
 ChatServerListener::~ChatServerListener()
 {
-    if(this->base)
-	event_base_free(this->base);
     if(this->listener)
 	evconnlistener_free(this->listener);
     if(this->ev_sigint)
 	event_free(ev_sigint);
+    if(this->base)
+	event_base_free(this->base);
 }
 
 void ChatServerListener::start()

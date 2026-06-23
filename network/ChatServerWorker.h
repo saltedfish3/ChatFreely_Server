@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <event2/event.h>
 #include <event2/bufferevent.h>
@@ -32,6 +33,9 @@
 //Login	    "Email":String  "Password":String
 //Register  "Username":String   "Email":String  "Password":String
 //Send	    "From":StringID	To":StringID  "Content":String
+//Update_Avatar  "Url":String
+//UnLogin
+//UpdateUsername  "Username":String
 //
 //Message Type(server)
 //HeartbeatResp LoginResp RegisterResp Message HelloResp
@@ -40,6 +44,9 @@
 //RegisterResp "Result":bool  "Info":String  if false --->  "From":"Email/Password/username"
 //Message "IsGroup":bool  "From":StringID  "Content":String
 //HelloResp "HeartbeatNum":int
+//UpdateAvatarResp   "Result":bool
+//UnLoginResp
+//UpdateUsernameResp  "Result":bool
 
 class ChatServerWorker
 {
@@ -64,7 +71,7 @@ private:
     std::thread myThread;
     //session
     std::unordered_map<int, std::shared_ptr<session>> list_session;
-    bool is_run;
+    std::atomic<bool> is_run;
     void listen();
         
     static void cb_read(bufferevent* bev, void* arg);
@@ -78,6 +85,9 @@ private:
     static void handleLogin(session* sess, std::string email, std::string password, const std::string requests_id);
     static void handleRegister(session* sess, std::string email, std::string password, std::string username, const std::string requests_id);
     static void handleSend(bufferevent* bev, const std::string requests_id);
+    static void handleUploadAvatar(session* sess, std::string url, const std::string requests_id);
+    static void handleUnLogin(session* sess, const std::string requests_id);
+    static void handleUpdateUsername(session* sess, std::string username, const std::string requests_id);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password); 
