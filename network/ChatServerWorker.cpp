@@ -336,7 +336,7 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 	    unsigned long len_avatar = 0;
 	    initStringParam(&result_param[4], buf_avatar, sizeof(buf_avatar), &len_avatar);
 
-	    std::string sql = "SELECT snowid, id, username, password, avatar_url FROM user WHERE email = ?;";
+	    std::string sql = "SELECT snowid, id, username, password, avatar_url FROM user WHERE email = ? AND status = 0;";
 	    if(!con->executeSql(sql, &bind_param, result_param))
 	    {
 		logger.error("executesql login error");
