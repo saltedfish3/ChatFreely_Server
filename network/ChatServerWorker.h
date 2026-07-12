@@ -36,6 +36,7 @@
 //Update_Avatar  "Url":String
 //UnLogin
 //UpdateUsername  "Username":String
+//AddNewFriendRequest "UID":String "Receiver_Email/Receiver_SID":String
 //
 //Message Type(server)
 //HeartbeatResp LoginResp RegisterResp Message HelloResp
@@ -47,6 +48,7 @@
 //UpdateAvatarResp   "Result":bool
 //UnLoginResp
 //UpdateUsernameResp  "Result":bool
+//AddNewFriendRequestResp "Result":bool "Info":String
 
 class ChatServerWorker
 {
@@ -89,11 +91,15 @@ private:
     static void handleUnLogin(session* sess, const std::string requests_id);
     static void handleUpdateUsername(session* sess, std::string username, const std::string requests_id);
 
+    static void handleAddNewFriendRequest(session* sess, std::string uid, std::string receiver_info, const std::string requests_id);
+
     static bool isEmail(const std::string& email);
-    static bool isPassword(const std::string& password); 
+    static bool isPassword(const std::string& password);
+    static bool isSID(const std::string& sid);
     static std::string hash_password(const std::string& password);
     static bool verify_password(const std::string& password, const std::string& stored_hash);
 
     static void initStringParam(MYSQL_BIND* pargma, char* buf_string, size_t buffer_length, unsigned long* length);
     static void initLongLongParam(MYSQL_BIND* pargma, int64_t* buf_longlong, size_t buffer_length);
+    static void initTinyIntParam(MYSQL_BIND* pargma, int8_t* buf_tinyint, size_t buffer_length);
 };

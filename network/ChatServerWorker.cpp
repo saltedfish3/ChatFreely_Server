@@ -248,6 +248,29 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	}
 	handleUpdateUsername(sess, j.value("Username", ""), requests_id.str());
     }
+    else if(type == "AddNewFriendRequest")
+    {
+	if(!j.contains("UID") || !j["UID"].is_string())
+	{
+	    logger.warn("Json no UID");
+	    return;
+	}
+	std::string receicer_info;
+	if(!j.contains("Receiver_SID") || !j["Receiver_SID"].is_string())
+	{
+	    if(!j.contains("Receiver_Email") || !j["Receiver_Email"].is_string())
+	    {
+		logger.warn("Json no SID And Email");
+		return;
+	    }
+	    else
+		receicer_info = j.value("Receiver_Email", "");
+	}
+	else
+	    receicer_info = j.value("Receiver_SID", "");
+	std::string uid = j.value("UID", "");
+	handleAddNewFriendRequest(sess, uid, receicer_info, requests_id.str());
+    }
     else
     {
 	logger.warn("Pack Type Error");
@@ -665,6 +688,139 @@ void ChatServerWorker::handleUpdateUsername(session* sess, std::string username,
     });
 }
 
+void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID, std::string receiver_info, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([sessPtr, UID, receiver_info, requests_id](){
+	bool result = false;
+	std::string info;
+	if(!isSID(receiver_info) && !isEmail(receiver_info))
+	{
+	    info = "申请添加好友ID错误";
+	}
+	else
+	{
+	    std::optional<int64_t> sid;
+	    if(isSID(receiver_info))
+		sid = std::stoll(receiver_info);
+	    SQL* con = SQLPool::getSQLPool()->getConn();
+	    int64_t record_id = sfGen.nextid();
+	    std::string sql = "SELECT snowid FROM user WHERE ";
+
+	    MYSQL_BIND bind_param;
+	    if(sid.has_value())
+	    {
+		sql += "id = ?;";
+		initLongLongParam(&bind_param, &sid.value(), sizeof(sid.value()));
+	    }
+	    else
+	    {
+		sql += "email = ?;";
+		unsigned long len_email = receiver_info.size();
+		initStringParam(&bind_param, (char*)receiver_info.data(), receiver_info.size(), &len_email);
+	    }
+	    MYSQL_BIND result_param;
+	    int64_t userb_uid;
+	    initLongLongParam(&result_param, &userb_uid, sizeof(userb_uid));
+	    con->executeSql(sql, &bind_param, &result_param);
+	    int ret = con->nextData();
+	    if(ret < 0)
+	    {
+		logger.warn("MySQL Nextdata < 0:In AddNewFriendRequest");
+		SQLPool::getSQLPool()->backConn(con);
+		return;
+	    }
+	    else if(ret == 0)
+	    {
+		info = "未找到该账户";
+	    }
+	    else if(userb_uid == std::stoll(UID))
+	    {
+		info = "不能和自己成为好友";
+	    }
+	    else
+	    {
+		SQLPool::getSQLPool()->backConn(con);
+		std::string sql1 = "INSERT INTO friendships(id, user_a, user_b) VALUES(?, LEAST(?, ?), GREATEST(?, ?)) ON DUPLICATE KEY UPDATE status = IF(status = 2, 0, status);";
+		con = SQLPool::getSQLPool()->getConn();
+		MYSQL_BIND bind_param1[5];
+		initLongLongParam(&bind_param1[0], &record_id, sizeof(record_id));
+		int64_t usera_uid = std::stoll(UID);
+		initLongLongParam(&bind_param1[1], &usera_uid, sizeof(usera_uid));
+		initLongLongParam(&bind_param1[2], &userb_uid, sizeof(userb_uid));
+		initLongLongParam(&bind_param1[3], &usera_uid, sizeof(usera_uid));
+		initLongLongParam(&bind_param1[4], &userb_uid, sizeof(userb_uid));
+
+		con->executeSql(sql1, bind_param1);
+		uint64_t affectRows = con->getAffectRows();
+		if(affectRows == 1 || affectRows == 2)
+		    result = true;
+		else if(affectRows == (uint64_t)-2)
+		{
+		    SQLPool::getSQLPool()->backConn(con);
+		    logger.warn("SQL Con State Error");
+		    return;
+		}
+		else if(affectRows == 0)
+		{
+		    SQLPool::getSQLPool()->backConn(con);
+		    std::string sql2 = "SELECT status FROM friendships WHERE user_a = LEAST(?, ?) AND user_b = GREATEST(?, ?);";
+		    con = SQLPool::getSQLPool()->getConn();
+
+		    MYSQL_BIND bind_param2[4];
+		    initLongLongParam(&bind_param2[0], &usera_uid, sizeof(usera_uid));
+		    initLongLongParam(&bind_param2[1], &userb_uid, sizeof(userb_uid));
+		    initLongLongParam(&bind_param2[2], &usera_uid, sizeof(usera_uid));
+		    initLongLongParam(&bind_param2[3], &userb_uid, sizeof(userb_uid));
+
+		    MYSQL_BIND result_param1;
+		    int8_t status = -1;
+		    initTinyIntParam(&result_param1, &status, sizeof(status));
+		
+		    con->executeSql(sql2, bind_param2, &result_param1);
+		    if(con->nextData() <= 0)
+		    {
+			logger.warn("MySQL Nextdata != 0:In AddNewFriendRequest");
+			SQLPool::getSQLPool()->backConn(con);
+			return;
+		    }
+		    if(status == 0)
+			info = "已发送好友申请，请等待通过申请";
+		    else if(status == 1)
+			info = "您已和对方是好友";
+		    else if(status == 3)
+			info = "对方已经将您拉黑";
+		    else
+		    {
+			SQLPool::getSQLPool()->backConn(con);
+			return;
+		    }
+		}
+	    }
+	    SQLPool::getSQLPool()->backConn(con);
+
+	    auto* func = new std::function<void()>([result, info, sessPtr, requests_id](){
+		json j;
+		j["Requests_id"] = requests_id;
+		j["Type"] = "AddNewFriendRequestResp";
+		j["Result"] = result;
+		if(!result)
+		    j["Info"] = info;
+		std::string data = j.dump() + "\n";
+	    
+		bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv{0, 0};
+	    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	    }, func, &tv);
+	}
+    });
+
+}
+
 bool ChatServerWorker::isEmail(const std::string& email)
 {
     std::regex email_pattern(R"(^[0-9a-zA-Z._%+-]+@[0-9a-zA-Z.-]+\.[a-zA-Z]{2,}$)");
@@ -675,6 +831,12 @@ bool ChatServerWorker::isPassword(const std::string& password)
 {
     std::regex password_pattern(R"(^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*])[a-zA-Z\d!@#$%^&*]{8,30}$)");
     return std::regex_match(password, password_pattern);
+}
+
+bool ChatServerWorker::isSID(const std::string& sid)
+{
+    std::regex sid_pattern(R"(^\d{10}$)");
+    return std::regex_match(sid, sid_pattern);
 }
 
 std::string ChatServerWorker::hash_password(const std::string& password)
@@ -707,5 +869,13 @@ void ChatServerWorker::initLongLongParam(MYSQL_BIND* pargma, int64_t* buf_longlo
     memset(pargma, 0, sizeof(*pargma));
     pargma->buffer_type = MYSQL_TYPE_LONGLONG;
     pargma->buffer = buf_longlong;
+    pargma->buffer_length = buffer_length;
+}
+
+void ChatServerWorker::initTinyIntParam(MYSQL_BIND* pargma, int8_t* buf_tinyint, size_t buffer_length)
+{
+    memset(pargma, 0, sizeof(*pargma));
+    pargma->buffer_type = MYSQL_TYPE_TINY;
+    pargma->buffer = buf_tinyint;
     pargma->buffer_length = buffer_length;
 }
