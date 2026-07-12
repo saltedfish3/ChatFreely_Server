@@ -255,7 +255,7 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	    logger.warn("Json no UID");
 	    return;
 	}
-	std::string receicer_info;
+	std::string receiver_info;
 	if(!j.contains("Receiver_SID") || !j["Receiver_SID"].is_string())
 	{
 	    if(!j.contains("Receiver_Email") || !j["Receiver_Email"].is_string())
@@ -264,12 +264,12 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 		return;
 	    }
 	    else
-		receicer_info = j.value("Receiver_Email", "");
+		receiver_info = j.value("Receiver_Email", "");
 	}
 	else
-	    receicer_info = j.value("Receiver_SID", "");
+	    receiver_info = j.value("Receiver_SID", "");
 	std::string uid = j.value("UID", "");
-	handleAddNewFriendRequest(sess, uid, receicer_info, requests_id.str());
+	handleAddNewFriendRequest(sess, uid, receiver_info, requests_id.str());
     }
     else
     {
@@ -708,6 +708,7 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 	    std::string sql = "SELECT snowid FROM user WHERE ";
 
 	    MYSQL_BIND bind_param;
+	    unsigned long len_email;
 	    if(sid.has_value())
 	    {
 		sql += "id = ?;";
@@ -716,13 +717,18 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 	    else
 	    {
 		sql += "email = ?;";
-		unsigned long len_email = receiver_info.size();
+		len_email = receiver_info.size();
 		initStringParam(&bind_param, (char*)receiver_info.data(), receiver_info.size(), &len_email);
 	    }
 	    MYSQL_BIND result_param;
 	    int64_t userb_uid;
 	    initLongLongParam(&result_param, &userb_uid, sizeof(userb_uid));
-	    con->executeSql(sql, &bind_param, &result_param);
+	    if(!con->executeSql(sql, &bind_param, &result_param))
+	    {
+		logger.error("executeSQL failed:" + std::string(con->getSQLError()));
+		SQLPool::getSQLPool()->backConn(con);
+		return;
+	    }
 	    int ret = con->nextData();
 	    if(ret < 0)
 	    {
@@ -741,15 +747,16 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 	    else
 	    {
 		SQLPool::getSQLPool()->backConn(con);
-		std::string sql1 = "INSERT INTO friendships(id, user_a, user_b) VALUES(?, LEAST(?, ?), GREATEST(?, ?)) ON DUPLICATE KEY UPDATE status = IF(status = 2, 0, status);";
+		std::string sql1 = "INSERT INTO friendships(id, user_a, user_b, lastaction_uid) VALUES(?, LEAST(?, ?), GREATEST(?, ?), ?) ON DUPLICATE KEY UPDATE status = IF(status = 2, 0, status);";
 		con = SQLPool::getSQLPool()->getConn();
-		MYSQL_BIND bind_param1[5];
+		MYSQL_BIND bind_param1[6];
 		initLongLongParam(&bind_param1[0], &record_id, sizeof(record_id));
 		int64_t usera_uid = std::stoll(UID);
 		initLongLongParam(&bind_param1[1], &usera_uid, sizeof(usera_uid));
 		initLongLongParam(&bind_param1[2], &userb_uid, sizeof(userb_uid));
 		initLongLongParam(&bind_param1[3], &usera_uid, sizeof(usera_uid));
 		initLongLongParam(&bind_param1[4], &userb_uid, sizeof(userb_uid));
+		initLongLongParam(&bind_param1[5], &usera_uid, sizeof(usera_uid));
 
 		con->executeSql(sql1, bind_param1);
 		uint64_t affectRows = con->getAffectRows();
@@ -764,7 +771,7 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 		else if(affectRows == 0)
 		{
 		    SQLPool::getSQLPool()->backConn(con);
-		    std::string sql2 = "SELECT status FROM friendships WHERE user_a = LEAST(?, ?) AND user_b = GREATEST(?, ?);";
+		    std::string sql2 = "SELECT status, lastaction_uid FROM friendships WHERE user_a = LEAST(?, ?) AND user_b = GREATEST(?, ?);";
 		    con = SQLPool::getSQLPool()->getConn();
 
 		    MYSQL_BIND bind_param2[4];
@@ -773,11 +780,13 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 		    initLongLongParam(&bind_param2[2], &usera_uid, sizeof(usera_uid));
 		    initLongLongParam(&bind_param2[3], &userb_uid, sizeof(userb_uid));
 
-		    MYSQL_BIND result_param1;
+		    MYSQL_BIND result_param1[2];
 		    int8_t status = -1;
-		    initTinyIntParam(&result_param1, &status, sizeof(status));
+		    initTinyIntParam(&result_param1[0], &status, sizeof(status));
+		    int64_t lastaction_uid;
+		    initLongLongParam(&result_param1[1], &lastaction_uid, sizeof(lastaction_uid));
 		
-		    con->executeSql(sql2, bind_param2, &result_param1);
+		    con->executeSql(sql2, bind_param2, result_param1);
 		    if(con->nextData() <= 0)
 		    {
 			logger.warn("MySQL Nextdata != 0:In AddNewFriendRequest");
@@ -789,7 +798,12 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 		    else if(status == 1)
 			info = "您已和对方是好友";
 		    else if(status == 3)
-			info = "对方已经将您拉黑";
+		    {
+			if(lastaction_uid == std::stoll(UID))
+			    info = "您已经给对方拉黑";
+			else
+			    info = "对方已经给您拉黑";
+		    }
 		    else
 		    {
 			SQLPool::getSQLPool()->backConn(con);
