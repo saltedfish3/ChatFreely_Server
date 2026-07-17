@@ -115,7 +115,36 @@ void ChatServerUploadWorker::cb_distribute(evhttp_request* req, void* arg)
 void ChatServerUploadWorker::cb_upload(evhttp_request* req, void* arg)
 {
     //using multipart/form-data
-    const char* ct = evhttp_find_header(evhttp_request_get_input_headers(req), "Content-Type");
+    auto input_header = evhttp_request_get_input_headers(req);
+    const char* auth = evhttp_find_header(input_header, "Authorization");
+    if(!auth)
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+    std::string authStr(auth);
+    std::string lowerAuth = authStr;
+
+    for(char& c : lowerAuth)
+    {
+	c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    size_t pos_tokenLine = lowerAuth.find("bearer ");
+    if(pos_tokenLine == std::string::npos)
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+    std::string accessToken = authStr.substr(pos_tokenLine + 7);
+    accessToken.erase(accessToken.find_last_not_of(" \t\r\n") + 1);
+    int64_t uid = GlobalTools::verifyAccessToken(accessToken);
+    if(uid == -1)
+    {
+	evhttp_send_reply(req, 401, nullptr, nullptr);
+	return;
+    }
+
+    const char* ct = evhttp_find_header(input_header, "Content-Type");
     if(!ct)
     {
 	evhttp_send_reply(req, 400, nullptr, nullptr);
@@ -346,6 +375,35 @@ bool ChatServerUploadWorker::isPng(const char* binary_data)
 
 void ChatServerUploadWorker::cb_download(evhttp_request* req, void* arg)
 {
+    auto input_header = evhttp_request_get_input_headers(req);
+    const char* auth = evhttp_find_header(input_header, "Authorization");
+    if(!auth)
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+    std::string authStr(auth);
+    std::string lowerAuth = authStr;
+
+    for(char& c : lowerAuth)
+    {
+	c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    size_t pos_tokenLine = lowerAuth.find("bearer ");
+    if(pos_tokenLine == std::string::npos)
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+    std::string accessToken = authStr.substr(pos_tokenLine + 7);
+    accessToken.erase(accessToken.find_last_not_of(" \t\r\n") + 1);
+    int64_t uid = GlobalTools::verifyAccessToken(accessToken);
+    if(uid == -1)
+    {
+	evhttp_send_reply(req, 401, nullptr, nullptr);
+	return;
+    }
+
     const char* uri = evhttp_request_get_uri(req);
 
     std::string filepath = "." + std::string(uri);

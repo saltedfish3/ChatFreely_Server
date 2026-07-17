@@ -11,7 +11,7 @@ INCLUDES = -I. \
 	   -I./logger
 
 # 链接库
-LIBS = -levent -lmysqlclient -lpthread -lsodium
+LIBS = -levent -lmysqlclient -lpthread -lsodium -lcrypto
 
 # 输出目录和目标
 BUILD_DIR = build
@@ -45,7 +45,7 @@ $(BUILD_DIR)/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR)
+	find $(BUILD_DIR) -name "*.o" -delete
 
 push:
 	git push origin master && git push github master

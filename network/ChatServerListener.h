@@ -12,6 +12,9 @@
 #include <csignal>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <fstream>
+#include <filesystem>
 #include "ChatServerWorker.h"
 #include "ChatServerUploadWorker.h"
 #include "../global/GlobalVar.h"
@@ -39,4 +42,5 @@ private:
 
     static void cb_listener(evconnlistener* listener,evutil_socket_t fd,sockaddr* addr, int socklen, void* arg);
     static void cb_sigint(evutil_socket_t sig, short events, void* arg);
+    static void loadJwtSecret(const std::string& filepath);
 };

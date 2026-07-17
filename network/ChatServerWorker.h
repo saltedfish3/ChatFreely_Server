@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <optional>
 #include <sodium.h>
+#include <jwt-cpp/jwt.h>
 
 #include "../global/GlobalVar.h"
 #include "../third_party/json.hpp"
@@ -36,7 +37,9 @@
 //Update_Avatar  "Url":String
 //UnLogin
 //UpdateUsername  "Username":String
-//AddNewFriendRequest "UID":String "Receiver_Email/Receiver_SID":String
+//AddNewFriendRequest "UID":String "Receiver_Email/Receiver_SID":String "VerMsg":String
+//HandleNewFriendRequest "Status":bool "UID":String "HandleUID":String
+//GetNewFriendRequestsList "UID":String
 //
 //Message Type(server)
 //HeartbeatResp LoginResp RegisterResp Message HelloResp
@@ -49,6 +52,8 @@
 //UnLoginResp
 //UpdateUsernameResp  "Result":bool
 //AddNewFriendRequestResp "Result":bool "Info":String
+//HandleNewFriendRequestResp "Result":bool
+//GetNewFriendRequestsListResp "Result":bool "List":list-array
 
 class ChatServerWorker
 {
@@ -85,21 +90,30 @@ private:
     static void handleHello(bufferevent* bev, const std::string requests_id);
     static void handleHeartbeat(bufferevent* bev, const std::string requests_id);
     static void handleLogin(session* sess, std::string email, std::string password, const std::string requests_id);
+    static void handleAccessTokenLogin(session* sess, std::string accessToken, const std::string requests_id);
     static void handleRegister(session* sess, std::string email, std::string password, std::string username, const std::string requests_id);
     static void handleSend(bufferevent* bev, const std::string requests_id);
-    static void handleUploadAvatar(session* sess, std::string url, const std::string requests_id);
-    static void handleUnLogin(session* sess, const std::string requests_id);
-    static void handleUpdateUsername(session* sess, std::string username, const std::string requests_id);
+    static void handleUploadAvatar(session* sess, std::string url, std::string accessToken, const std::string requests_id);
+    static void handleUnLogin(session* sess, std::string accessToken, const std::string requests_id);
+    static void handleUpdateUsername(session* sess, std::string username, std::string accessToken, const std::string requests_id);
 
-    static void handleAddNewFriendRequest(session* sess, std::string uid, std::string receiver_info, const std::string requests_id);
+    static void handleAddNewFriendRequest(session* sess, std::string uid, std::string receiver_info, std::string verification_msg, const std::string requests_id);
+    static void handleHandleNewFriendRequest(session* sess, std::string uid, std::string handle_uid, bool isAgree, const std::string requests_id);
+    static void handleGetNewFriendRequestsList(session* sess, std::string uid, const std::string requests_id);
+
+    static void handleRefreshToken(session* sess, std::string refreshToken, const std::string requests_id);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);
     static bool isSID(const std::string& sid);
+    static bool isUID(const std::string& uid);
     static std::string hash_password(const std::string& password);
     static bool verify_password(const std::string& password, const std::string& stored_hash);
 
     static void initStringParam(MYSQL_BIND* pargma, char* buf_string, size_t buffer_length, unsigned long* length);
     static void initLongLongParam(MYSQL_BIND* pargma, int64_t* buf_longlong, size_t buffer_length);
     static void initTinyIntParam(MYSQL_BIND* pargma, int8_t* buf_tinyint, size_t buffer_length);
+
+    static std::string createAccessToken(int64_t uid, const std::chrono::seconds& expire_duration = std::chrono::minutes(45));
+    static std::pair<std::string, std::string> createRefreshToken();
 };

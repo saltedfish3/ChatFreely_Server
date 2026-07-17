@@ -1,4 +1,10 @@
 #include "ChatServerListener.h"
+#include <filesystem>
+#include <sodium/randombytes.h>
+#include <sodium/utils.h>
+#include <stdexcept>
+#include <string>
+#include <sys/stat.h>
 
 Logger ChatServerListener::logger("listener");
 
@@ -43,6 +49,7 @@ ChatServerListener::ChatServerListener(unsigned short port,int workerNum, int up
     this->list_worker.reserve(workerNum>0?workerNum:1);
     try
     {
+	loadJwtSecret("./secret/jwt_secret.key");
 	for(int i = 0; i < (workerNum>0?workerNum:1); i++)
 	{
 	    auto worker = std::make_unique<ChatServerWorker>();
@@ -103,4 +110,34 @@ void ChatServerListener::cb_sigint(evutil_socket_t sig,short events, void* arg)
     if(csl->base)
 	event_base_loopbreak(csl->base);
     logger.info("Shutdown now...");
+}
+
+void ChatServerListener::loadJwtSecret(const std::string& filepath)
+{
+    std::ifstream ifs(filepath);
+    if(ifs.good())
+    {
+	std::string secret;
+	std::getline(ifs, secret);
+	if(!secret.empty())
+	{
+	    jwt_secret = secret;
+	    ifs.close();
+	    return;
+	}
+    }
+    ifs.close();
+
+    unsigned char buf[32];
+    randombytes_buf(buf, sizeof(buf));
+    char hex[65];
+    sodium_bin2hex(hex, sizeof(hex), buf, sizeof(buf));
+    jwt_secret = std::string(hex, 64);
+    std::filesystem::create_directories(std::filesystem::path(filepath).parent_path());
+    std::ofstream ofs(filepath, std::ios::trunc);
+    if(!ofs.is_open())
+	throw std::runtime_error("持久化JWT密钥文件失败：" + filepath);
+    ofs << jwt_secret;
+    ofs.close();
+    chmod(filepath.c_str(), S_IRUSR | S_IWUSR);
 }
