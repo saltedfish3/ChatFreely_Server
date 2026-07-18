@@ -97,9 +97,9 @@ private:
     static void handleUnLogin(session* sess, std::string accessToken, const std::string requests_id);
     static void handleUpdateUsername(session* sess, std::string username, std::string accessToken, const std::string requests_id);
 
-    static void handleAddNewFriendRequest(session* sess, std::string uid, std::string receiver_info, std::string verification_msg, const std::string requests_id);
-    static void handleHandleNewFriendRequest(session* sess, std::string uid, std::string handle_uid, bool isAgree, const std::string requests_id);
-    static void handleGetNewFriendRequestsList(session* sess, std::string uid, const std::string requests_id);
+    static void handleAddNewFriendRequest(session* sess, std::string receiver_info, std::string verification_msg, std::string accessToken, const std::string requests_id);
+    static void handleHandleNewFriendRequest(session* sess, std::string handle_uid, bool isAgree, std::string accessToken, const std::string requests_id);
+    static void handleGetNewFriendRequestsList(session* sess, std::string accessToken, const std::string requests_id);
 
     static void handleRefreshToken(session* sess, std::string refreshToken, const std::string requests_id);
 

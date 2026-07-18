@@ -275,9 +275,9 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
     }
     else if(type == "AddNewFriendRequest")
     {
-	if(!j.contains("UID") || !j["UID"].is_string())
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
 	{
-	    logger.warn("Json no UID");
+	    logger.warn("Json no AccessToken");
 	    return;
 	}
 	std::string receiver_info;
@@ -293,34 +293,36 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	}
 	else
 	    receiver_info = j.value("Receiver_SID", "");
-	std::string uid = j.value("UID", "");
 	std::string verMsg;
 	if(j.contains("VerMsg") && j["VerMsg"].is_string())
 	    verMsg = j["VerMsg"];
-	handleAddNewFriendRequest(sess, uid, receiver_info, verMsg, requests_id.str());
+	handleAddNewFriendRequest(sess, receiver_info, verMsg, j.value("AccessToken", ""), requests_id.str());
     }
     else if(type == "HandleNewFriendRequest")
     {
-	if((!j.contains("UID") || !j["UID"].is_string()) && (!j.contains("HandleUID") || !j["HandleUID"].is_string()) && (!j.contains("Status") || j["Status"].is_boolean()))
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
+	{
+	    logger.warn("Json No AccessToken");
+	    return;
+	}
+	if((!j.contains("HandleUID") || !j["HandleUID"].is_string()) && (!j.contains("Status") || j["Status"].is_boolean()))
 	{
 	    logger.warn("处理新好友申请缺少参数");
 	    return;
 	}
-	std::string uid = j.value("UID", "");
 	std::string handle_uid = j.value("HandleUID", "");
 	bool isAgree = j.value("Status", false);
-	handleHandleNewFriendRequest(sess, uid, handle_uid, isAgree, requests_id.str());
+	handleHandleNewFriendRequest(sess, handle_uid, isAgree, j.value("AccessToken", ""), requests_id.str());
 	
     }
     else if(type == "GetNewFriendRequestsList")
     {
-	if(!j.contains("UID") || !j["UID"].is_string())
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
 	{
-	    logger.warn("获取新好友申请缺少参数");
+	    logger.warn("Json No AccessToken");
 	    return;
 	}
-	std::string uid = j.value("UID", "");
-	handleGetNewFriendRequestsList(sess, uid, requests_id.str());
+	handleGetNewFriendRequestsList(sess, j.value("AccessToken", ""), requests_id.str());
     }
     else if(type == "RefreshToken")
     {
@@ -820,17 +822,20 @@ void ChatServerWorker::handleUpdateUsername(session* sess, std::string username,
     });
 }
 
-void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID, std::string receiver_info, std::string verification_msg, const std::string requests_id)
+void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string receiver_info, std::string verification_msg, std::string accessToken, const std::string requests_id)
 {
     auto sessPtr = sess->shared_from_this();
-    ThreadPool::getThreadPool()->addTask([sessPtr, UID, receiver_info, verification_msg, requests_id](){
+    ThreadPool::getThreadPool()->addTask([sessPtr, receiver_info, verification_msg, requests_id, accessToken](){
 	bool result = false;
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && sessPtr->uid.value() == uid_token && uid_token != -1;
+
 	std::string info;
 	if(!isSID(receiver_info) && !isEmail(receiver_info))
 	{
 	    info = "申请添加好友ID错误";
 	}
-	else
+	else if(uidValid)
 	{
 	    std::optional<int64_t> sid;
 	    if(isSID(receiver_info))
@@ -872,7 +877,7 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 	    {
 		info = "未找到该账户";
 	    }
-	    else if(userb_uid == std::stoll(UID))
+	    else if(userb_uid == sessPtr->uid.value())
 	    {
 		info = "不能和自己成为好友";
 	    }
@@ -883,7 +888,7 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 		con = SQLPool::getSQLPool()->getConn();
 		MYSQL_BIND bind_param1[7];
 		initLongLongParam(&bind_param1[0], &record_id, sizeof(record_id));
-		int64_t usera_uid = std::stoll(UID);
+		int64_t usera_uid = sessPtr->uid.value();
 		initLongLongParam(&bind_param1[1], &usera_uid, sizeof(usera_uid));
 		initLongLongParam(&bind_param1[2], &userb_uid, sizeof(userb_uid));
 		initLongLongParam(&bind_param1[3], &usera_uid, sizeof(usera_uid));
@@ -933,7 +938,7 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 			info = "您已和对方是好友";
 		    else if(status == 3)
 		    {
-			if(lastaction_uid == std::stoll(UID))
+			if(lastaction_uid == sessPtr->uid.value())
 			    info = "您已经给对方拉黑";
 			else
 			    info = "对方已经给您拉黑";
@@ -947,13 +952,18 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 	    }
 	    SQLPool::getSQLPool()->backConn(con);
 
-	    auto* func = new std::function<void()>([result, info, sessPtr, requests_id](){
+	    auto* func = new std::function<void()>([result, info, sessPtr, requests_id, uidValid](){
 		json j;
 		j["Requests_id"] = requests_id;
 		j["Type"] = "AddNewFriendRequestResp";
 		j["Result"] = result;
 		if(!result)
 		    j["Info"] = info;
+		if(!uidValid)
+		{
+		    j["Result"] = false;
+		    j["AccessTokenExpired"] = true;
+		}
 		std::string data = j.dump() + "\n";
 	    
 		bufferevent_write(sessPtr->bev, data.c_str(), data.size());
@@ -969,13 +979,15 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string UID,
 
 }
 
-void ChatServerWorker::handleHandleNewFriendRequest(session* sess, std::string uid, std::string handle_uid, bool isAgree, const std::string requests_id)
+void ChatServerWorker::handleHandleNewFriendRequest(session* sess, std::string handle_uid, bool isAgree, std::string accessToken, const std::string requests_id)
 {
     auto sessPtr = sess->shared_from_this();
-    ThreadPool::getThreadPool()->addTask([sessPtr, uid, handle_uid, isAgree, requests_id](){
+    ThreadPool::getThreadPool()->addTask([sessPtr, handle_uid, isAgree, requests_id, accessToken](){
 	bool result = false;
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && uid_token != -1 && sessPtr->uid.value() == uid_token;
 
-	if(isUID(uid) && isUID(handle_uid))
+	if(isUID(handle_uid) && uidValid)
 	{
 	    std::string sql = "UPDATE friendships SET status = ?, lastaction_uid = ? WHERE user_a = LEAST(?, ?) AND user_b = GREATEST(?, ?);";
 	    int8_t status = 0;
@@ -983,7 +995,7 @@ void ChatServerWorker::handleHandleNewFriendRequest(session* sess, std::string u
 		status = 1;
 	    else
 		status = 2;
-	    int64_t uid_ = std::stoll(uid);
+	    int64_t uid_ = sessPtr->uid.value();
 	    int64_t handle_uid_ = std::stoll(handle_uid);
 
 	    MYSQL_BIND bind_param[6];
@@ -1000,37 +1012,39 @@ void ChatServerWorker::handleHandleNewFriendRequest(session* sess, std::string u
 	    if(affectRows > 0)
 		result = true;
 	    SQLPool::getSQLPool()->backConn(con);
-	    auto* func = new std::function<void()>([result, sessPtr, requests_id](){
-		json j;
-		j["Requests_id"] = requests_id;
-		j["Type"] = "HandleNewFriendRequestResp";
-		j["Result"] = result;
-		
-		std::string data = j.dump() + "\n";
-	    
-		bufferevent_write(sessPtr->bev, data.c_str(), data.size());
-	    });
-	    timeval tv{0, 0};
-	    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-		auto* func = static_cast<std::function<void()>*>(arg);
-		(*func)();
-		delete func;
-	    }, func, &tv);
-
 	}
+	auto* func = new std::function<void()>([result, sessPtr, requests_id, uidValid](){
+	    json j;
+	    j["Requests_id"] = requests_id;
+	    j["Type"] = "HandleNewFriendRequestResp";
+	    j["Result"] = result;
+	    if(!uidValid)
+		j["AccessTokenExpired"] = true;
+		
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	});
+	timeval tv{0, 0};
+	event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	    auto* func = static_cast<std::function<void()>*>(arg);
+	    (*func)();
+	    delete func;
+	}, func, &tv);
     });
 }
 
-void ChatServerWorker::handleGetNewFriendRequestsList(session* sess, std::string uid, const std::string requests_id)
+void ChatServerWorker::handleGetNewFriendRequestsList(session* sess, std::string accessToken, const std::string requests_id)
 {
     auto sessPtr = sess->shared_from_this();
-    ThreadPool::getThreadPool()->addTask([sessPtr, uid, requests_id](){
+    ThreadPool::getThreadPool()->addTask([sessPtr, requests_id, accessToken](){
 	bool result = false;
 	json arr = json::array();
-	if(isUID(uid))
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && sessPtr->uid.value() == uid_token && uid_token != -1;
+	if(uidValid)
 	{
-	    int64_t uid_;
-	    uid_ = std::stoll(uid);
+	    int64_t uid_ = sessPtr->uid.value();
 	    std::string sql = "SELECT user.id, user.snowid, user.username, user.avatar_url, friendships.verification_msg FROM friendships JOIN user ON user.snowid = friendships.lastaction_uid WHERE friendships.status = 0 AND friendships.user_a = ? AND lastaction_uid != ? UNION ALL SELECT user.id, user.snowid, user.username, user.avatar_url, friendships.verification_msg FROM friendships JOIN user ON user.snowid = friendships.lastaction_uid WHERE friendships.status = 0 AND friendships.user_b = ? AND lastaction_uid != ?;";
 
 	    MYSQL_BIND bind_param[4];
@@ -1079,13 +1093,18 @@ void ChatServerWorker::handleGetNewFriendRequestsList(session* sess, std::string
 	    }
 	    SQLPool::getSQLPool()->backConn(con);
 	}
-	auto* func = new std::function<void()>([result, sessPtr, requests_id, arr](){
+	auto* func = new std::function<void()>([result, sessPtr, requests_id, arr, uidValid](){
 	    json j;
 	    j["Requests_id"] = requests_id;
 	    j["Type"] = "GetNewFriendRequestsListResp";
 	    j["Result"] = result;
 	    if(result)
 		j["List"] = arr;
+	    if(!uidValid)
+	    {
+		j["Result"] = false;
+		j["AccessTokenExpired"] = true;
+	    }
 	    std::string data = j.dump() + "\n";
 	    
 	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
