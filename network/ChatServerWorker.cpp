@@ -1,15 +1,16 @@
 #include "ChatServerWorker.h"
-#include <algorithm>
 #include <bits/types/struct_timeval.h>
 #include <chrono>
 #include <cstring>
 #include <event2/bufferevent.h>
 #include <event2/event.h>
+#include <event2/thread.h>
 #include <event2/util.h>
-#include <exception>
 #include <functional>
 #include <jwt-cpp/jwt.h>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <sodium/core.h>
 #include <sodium/crypto_hash_sha256.h>
 #include <sodium/crypto_pwhash.h>
@@ -17,11 +18,14 @@
 #include <sodium/utils.h>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 Logger ChatServerWorker::logger("worker");
 
 ChatServerWorker::ChatServerWorker()
 {
+    if(evthread_use_pthreads() < 0)
+	throw std::runtime_error("User evthread Error");
     this->base = event_base_new();
     if(!base)
 	throw std::runtime_error("Worker Create Base Error\n");
@@ -142,8 +146,17 @@ void ChatServerWorker::cb_event(bufferevent* bev, short events, void* arg)
     if(events & BEV_EVENT_EOF)
     {
 	logger.info("Client Exit");
-	if(sess->uid.has_value())
-	    onlineUser.erase(sess->uid.value());
+	int64_t uid = -1;
+	{
+	    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+	    if(sess->uid.has_value())
+	    {
+		uid = sess->uid.value();
+		onlineUser.erase(sess->uid.value());
+	    }
+	}
+	if(uid != -1)
+	    pushFriendStatus(uid, false);
 	int fd = bufferevent_getfd(bev);
 	if(bev)
 	    bufferevent_free(bev);
@@ -153,8 +166,17 @@ void ChatServerWorker::cb_event(bufferevent* bev, short events, void* arg)
     else if(events & BEV_EVENT_ERROR)
     {
 	logger.info(std::string("Connect Error:") + evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
-	if(sess->uid.has_value())
-	    onlineUser.erase(sess->uid.value());
+	int64_t uid = -1;
+	{
+	    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+	    if(sess->uid.has_value())
+	    {
+		uid = sess->uid.value();
+		onlineUser.erase(sess->uid.value());
+	    }
+	}
+	if(uid != -1)
+	    pushFriendStatus(uid, false);
 	int fd = bufferevent_getfd(bev);
 	if(bev)
 	    bufferevent_free(bev);
@@ -164,8 +186,17 @@ void ChatServerWorker::cb_event(bufferevent* bev, short events, void* arg)
     else if(events & BEV_EVENT_TIMEOUT)
     {
 	logger.info("Client Timeout Exit");
-	if(sess->uid.has_value())
-	    onlineUser.erase(sess->uid.value());
+	int64_t uid = -1;
+	{
+	    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+	    if(sess->uid.has_value())
+	    {
+		uid = sess->uid.value();
+		onlineUser.erase(sess->uid.value());
+	    }
+	}
+	if(uid != -1)
+	    pushFriendStatus(uid, false);
 	int fd = bufferevent_getfd(bev);
 	if(bev)
 	    bufferevent_free(bev);
@@ -324,6 +355,15 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	}
 	handleGetNewFriendRequestsList(sess, j.value("AccessToken", ""), requests_id.str());
     }
+    else if(type == "GetFriendList")
+    {
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
+	{
+	    logger.warn("Json No AccessToken");
+	    return;
+	}
+	handleGetFriendList(sess, j.value("AccessToken", ""), requests_id.str());
+    }
     else if(type == "RefreshToken")
     {
 	if(!j.contains("RefreshToken") || !j["RefreshToken"].is_string())
@@ -420,15 +460,15 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 	    initLongLongParam(&result_param[0], &uid, sizeof(uid));
 	    initLongLongParam(&result_param[1], &sid, sizeof(sid));
 
-	    char buf_username[64];
+	    char buf_username[64*4];
 	    unsigned long len_username = 0;
 	    initStringParam(&result_param[2], buf_username, sizeof(buf_username), &len_username);
 
-	    char buf_password[128];
+	    char buf_password[128*4];
 	    unsigned long len_password = 0;
 	    initStringParam(&result_param[3], buf_password, sizeof(buf_password), &len_password);
 
-	    char buf_avatar[512];
+	    char buf_avatar[512*4];
 	    unsigned long len_avatar = 0;
 	    initStringParam(&result_param[4], buf_avatar, sizeof(buf_avatar), &len_avatar);
 
@@ -458,7 +498,12 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 		if(ret == 1)
 		{
 		    //have user
-		    if(onlineUser.find(uid) != onlineUser.end())
+		    std::unordered_map<int64_t, std::shared_ptr<userInfo>>::iterator pos_;
+		    {
+			std::shared_lock lock(mutex_onlineUser);
+			pos_ = onlineUser.find(uid);
+		    }
+		    if(pos_ != onlineUser.end())
 		    {
 			from = "Email";
 			info = "该用户已在线";
@@ -548,7 +593,14 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 		auto user_info = std::make_shared<userInfo>();
 		user_info->username = username;
 		user_info->email = email;
-		onlineUser[std::stoll(g_uid)] = user_info;
+		user_info->sid = g_sid;
+		user_info->avatar_url = avatar_url;
+		user_info->sessPtr = sessPtr;
+		pushFriendStatus(sessPtr->uid.value(), true);
+		{
+		    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+		    onlineUser[std::stoll(g_uid)] = user_info;
+		}
 	    }
 	    else
 	    {
@@ -703,6 +755,12 @@ void ChatServerWorker::handleUploadAvatar(session* sess, std::string url, std::s
 
 	    if(con1->getAffectRows() > 0)
 	    {
+		{
+		    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+		    auto it = onlineUser.find(sessPtr->uid.value());
+		    if(it != onlineUser.end())
+			it->second->avatar_url = url;
+		}
 		result = true;
 	    }
 	    std::string delete_avatar(buf_avatar, len_avatar);
@@ -771,10 +829,20 @@ void ChatServerWorker::handleUnLogin(session* sess, std::string accessToken, con
     bufferevent_write(sessPtr->bev, data.c_str(), data.size());
     if(result)
     {
-	if(sessPtr->uid.has_value())
-	    onlineUser.erase(sessPtr->uid.value());
-	sessPtr->uid.reset();
+	int64_t uid = -1;
+	{
+	    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+	    if(sessPtr->uid.has_value())
+	    {
+		uid = sessPtr->uid.value();
+		onlineUser.erase(sessPtr->uid.value());
+	    }
+	    sessPtr->uid.reset();
+	}
+	if(uid != -1)
+	    pushFriendStatus(uid, false);
     }
+
 }
 
 void ChatServerWorker::handleUpdateUsername(session* sess, std::string username, std::string accessToken, const std::string requests_id)
@@ -796,7 +864,15 @@ void ChatServerWorker::handleUpdateUsername(session* sess, std::string username,
 
 	    con->executeSql(sql, bind_param);
 	    if(con->getAffectRows() > 0)
+	    {
+		{
+		    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+		    auto it = onlineUser.find(sessPtr->uid.value());
+		    if(it != onlineUser.end())
+			it->second->username = username;
+		}
 		result = true;
+	    }
 	}
 	auto* func = new std::function<void()>([sessPtr, result, requests_id, uid_token](){
 	    json j;
@@ -884,7 +960,7 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string rece
 	    else
 	    {
 		SQLPool::getSQLPool()->backConn(con);
-		std::string sql1 = "INSERT INTO friendships(id, user_a, user_b, lastaction_uid, verification_msg) VALUES(?, LEAST(?, ?), GREATEST(?, ?), ?, ?) ON DUPLICATE KEY UPDATE status = IF(status = 2, 0, status), verification_msg = VALUES(verification_msg)";
+		std::string sql1 = "INSERT INTO friendships(id, user_a, user_b, lastaction_uid, verification_msg) VALUES(?, LEAST(?, ?), GREATEST(?, ?), ?, ?) ON DUPLICATE KEY UPDATE lastaction_uid = IF(status = 2, VALUES(lastaction_uid), lastaction_uid), verification_msg = IF(status = 2, VALUES(verification_msg), verification_msg), status = IF(status = 2, 0, status);";
 		con = SQLPool::getSQLPool()->getConn();
 		MYSQL_BIND bind_param1[7];
 		initLongLongParam(&bind_param1[0], &record_id, sizeof(record_id));
@@ -951,6 +1027,8 @@ void ChatServerWorker::handleAddNewFriendRequest(session* sess, std::string rece
 		}
 	    }
 	    SQLPool::getSQLPool()->backConn(con);
+	    if(result)
+		pushNewFriendRequests(sessPtr->uid.value(), userb_uid, verification_msg);
 
 	    auto* func = new std::function<void()>([result, info, sessPtr, requests_id, uidValid](){
 		json j;
@@ -1010,7 +1088,10 @@ void ChatServerWorker::handleHandleNewFriendRequest(session* sess, std::string h
 	    con->executeSql(sql, bind_param);
 	    int affectRows = con->getAffectRows();
 	    if(affectRows > 0)
+	    {
 		result = true;
+		pushNewFriend(sessPtr->uid.value(), handle_uid_);
+	    }
 	    SQLPool::getSQLPool()->backConn(con);
 	}
 	auto* func = new std::function<void()>([result, sessPtr, requests_id, uidValid](){
@@ -1118,6 +1199,97 @@ void ChatServerWorker::handleGetNewFriendRequestsList(session* sess, std::string
     });
 }
 
+void ChatServerWorker::handleGetFriendList(session* sess, std::string accessToken, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([sessPtr, accessToken, requests_id](){
+	bool result = false;
+	json arr = json::array();
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && sessPtr->uid.value() == uid_token && uid_token != -1;
+	if(uidValid)
+	{
+	    std::string sql = "SELECT user.id, user.snowid, user.username, user.email, user.avatar_url FROM friendships JOIN user ON user.snowid = friendships.user_a WHERE friendships.status = 1 AND friendships.user_b = ? UNION ALL SELECT user.id, user.snowid, user.username, user.email, user.avatar_url FROM friendships JOIN user ON user.snowid = friendships.user_b WHERE friendships.status = 1 AND friendships.user_a = ?;";
+	    int64_t uid = sessPtr->uid.value();
+	    MYSQL_BIND bind_param[2];
+	    initLongLongParam(&bind_param[0], &uid, sizeof(uid));
+	    initLongLongParam(&bind_param[1], &uid, sizeof(uid));
+
+	    int64_t user_sid;
+	    int64_t user_uid;
+	    char buf_username[64*4];
+	    char buf_email[128*4];
+	    char buf_avatar[512*4];
+	    MYSQL_BIND result_param[5];
+	    initLongLongParam(&result_param[0], &user_sid, sizeof(user_sid));
+	    initLongLongParam(&result_param[1], &user_uid, sizeof(user_uid));
+	    unsigned long len_username = 0;
+	    initStringParam(&result_param[2], buf_username, sizeof(buf_username), &len_username);
+	    unsigned long len_email = 0;
+	    initStringParam(&result_param[3], buf_email, sizeof(buf_email), &len_email);
+	    unsigned long len_avatar = 0;
+	    initStringParam(&result_param[4], buf_avatar, sizeof(buf_avatar), &len_avatar);
+
+	    SQL* con = SQLPool::getSQLPool()->getConn();
+	    con->executeSql(sql, bind_param, result_param);
+	    int ret, count = 0;
+	    while((ret = con->nextData()) == 1)
+	    {
+		json item;
+		item["SID"] = std::to_string(user_sid);
+		item["UID"] = std::to_string(user_uid);
+		item["Username"] = std::string(buf_username, len_username);
+		item["Email"] = std::string(buf_email, len_email);
+		item["Avatar_Url"] = std::string(buf_avatar, len_avatar);
+		bool isOnline = false;
+		{
+		    std::shared_lock lock(mutex_onlineUser);
+		    if(onlineUser.find(user_uid) != onlineUser.end())
+			isOnline = true;
+		}
+		item["IsOnline"] = isOnline;
+		arr.push_back(item);
+		count++;
+	    }
+	    if(ret != 0)
+	    {
+		logger.warn("获取好友列表错误");
+		SQLPool::getSQLPool()->backConn(con);
+		return;
+	    }
+	    else
+	    {
+		if(count > 0)
+		    result = true;
+	    }
+	    SQLPool::getSQLPool()->backConn(con);
+	    auto* func = new std::function<void()>([result, sessPtr, requests_id, arr, uidValid](){
+		json j;
+		j["Requests_id"] = requests_id;
+		j["Type"] = "GetFriendListResp";
+		j["Result"] = result;
+		if(result)
+		    j["List"] = arr;
+		if(!uidValid)
+		{
+		    j["Result"] = false;
+		    j["AccessTokenExpired"] = true;
+	    }
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv{0, 0};
+	    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	    }, func, &tv);
+	}
+    });
+
+}
+
 void ChatServerWorker::handleRefreshToken(session* sess, std::string refreshToken, const std::string requests_id)
 {
     auto sessPtr = sess->shared_from_this();
@@ -1153,15 +1325,20 @@ void ChatServerWorker::handleRefreshToken(session* sess, std::string refreshToke
 		{
 		    j["AccessToken"] = accessToken;
 		    if(!sessPtr->uid.has_value())
-		    {
 			sessPtr->uid = uid;
-			auto user_info = std::make_shared<userInfo>();
-			onlineUser[uid] = user_info;
-		    }
 		}
 		else
 		{
 		    j["RefreshTokenExpired"] = true;
+		    if(sessPtr->uid.has_value())
+		    {
+			int64_t uid = sessPtr->uid.value();
+			{
+			    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+			    onlineUser.erase(uid);
+			}
+			pushFriendStatus(uid, false);
+		    }
 		    sessPtr->uid.reset();
 		}
 		std::string data = j.dump() + "\n";
@@ -1187,26 +1364,349 @@ void ChatServerWorker::handleRefreshToken(session* sess, std::string refreshToke
 void ChatServerWorker::handleAccessTokenLogin(session* sess, std::string accessToken, const std::string requests_id)
 {
     auto sessPtr = sess->shared_from_this();
-    bool result = false;
-    int64_t uid = GlobalTools::verifyAccessToken(accessToken);
-    if(uid != -1)
-    {
-	result = true;
-	sessPtr->uid = uid;
-	onlineUser.erase(uid);
-	auto user_info = std::make_shared<userInfo>();
-	onlineUser[uid] = user_info;
-    }
-    json j;
-    j["Requests_id"] = requests_id;
-    j["Type"] = "AccessTokenLoginResp";
-    j["Result"] = result;
-    if(!result)
-	j["AccessTokenExpired"] = true;
+    ThreadPool::getThreadPool()->addTask([sessPtr, accessToken, requests_id](){
+	bool result = false;
+	bool isAccessTokenExpired = false;
+	int64_t uid = GlobalTools::verifyAccessToken(accessToken);
+	if(uid != -1)
+	{
+	    std::string sql = "SELECT id, username, avatar_url, email FROM user WHERE snowid = ?;";
+	    MYSQL_BIND bind_param;
+	    int64_t uid_ = uid;
+	    initLongLongParam(&bind_param, &uid_, sizeof(uid_));
 
-    std::string data = j.dump() + "\n";
+	    MYSQL_BIND result_param[4];
+	    int64_t sid;
+	    initLongLongParam(&result_param[0], &sid, sizeof(sid));
+	    char buf_username[64*4];
+	    unsigned long len_username = 0;
+	    initStringParam(&result_param[1], buf_username, sizeof(buf_username), &len_username);
+	    char buf_avatarUrl[512*4];
+	    unsigned long len_avatarUrl = 0;
+	    initStringParam(&result_param[2], buf_avatarUrl, sizeof(buf_avatarUrl), &len_avatarUrl);
+	    char buf_email[128*4];
+	    unsigned long len_email = 0;
+	    initStringParam(&result_param[3], buf_email, sizeof(buf_email), &len_email);
+
+	    SQL* con = SQLPool::getSQLPool()->getConn();
+	    con->executeSql(sql, &bind_param, result_param);
+	    if(con->nextData() > 0)
+	    {
+		//result = true;
+		{
+		    std::lock_guard<std::shared_mutex> lock(mutex_onlineUser);
+		    onlineUser.erase(uid);
+		    auto user_info = std::make_shared<userInfo>();
+		    user_info->sessPtr = sessPtr;
+		    user_info->sid = std::to_string(sid);
+		    user_info->username = std::string(buf_username, len_username);
+		    user_info->email = std::string(buf_email, len_email);
+		    user_info->avatar_url = std::string(buf_avatarUrl, len_avatarUrl);
+		    onlineUser[uid] = user_info;
+		}	
+		sessPtr->uid = uid;
+		result = true;
+		pushFriendStatus(sessPtr->uid.value(), true);
+	    }
+	    SQLPool::getSQLPool()->backConn(con);
+	}
+	else
+	    isAccessTokenExpired = true;
+	auto* func = new std::function<void()>([result, sessPtr, requests_id, isAccessTokenExpired](){
+	    json j;
+	    j["Requests_id"] = requests_id;
+	    j["Type"] = "AccessTokenLoginResp";
+	    j["Result"] = result;
+		if(isAccessTokenExpired)
+		    j["AccessTokenExpired"] = true;
+
+	    std::string data = j.dump() + "\n";
 	    
-		bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv{0, 0};
+	    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	}, func, &tv);
+    });
+}
+
+void ChatServerWorker::pushNewFriendRequests(int64_t sendUID, int64_t pushUID, const std::string& verMsg)
+{
+    std::shared_ptr<session> pushSessPtr;
+    std::shared_ptr<userInfo> sendInfoPtr;
+    {
+	std::shared_lock lock(mutex_onlineUser);
+	auto it_push = onlineUser.find(pushUID);
+	if(it_push == onlineUser.end())
+	    return;
+	pushSessPtr = it_push->second->sessPtr.lock();
+	if(!pushSessPtr)
+	    return;
+	auto it_send = onlineUser.find(sendUID);
+	if(it_send != onlineUser.end())
+	    sendInfoPtr = it_send->second;
+    }
+    std::string SID;
+    std::string username;
+    std::string avatar_url;
+    if(!sendInfoPtr)
+    {
+	std::string sql = "SELECT id, username, avatar_url FROM user WHERE snowid = ?;";
+	MYSQL_BIND bind_param;
+	initLongLongParam(&bind_param, &sendUID, sizeof(sendUID));
+	int64_t sid;
+	char buf_username[64*4];
+	unsigned long len_username = 0;
+	char buf_avatar[512*4];
+	unsigned long len_avatar = 0;
+	MYSQL_BIND result_param[3];
+	initLongLongParam(&result_param[0], &sid, sizeof(sid));
+	initStringParam(&result_param[1], buf_username, sizeof(buf_username), &len_username);
+	initStringParam(&result_param[2], buf_avatar, sizeof(buf_avatar), &len_avatar);
+	SQL* con = SQLPool::getSQLPool()->getConn();
+	con->executeSql(sql, &bind_param, result_param);
+	if(con->nextData() <= 0)
+	    return;
+	SQLPool::getSQLPool()->backConn(con);
+	username = std::string(buf_username, len_username);
+	avatar_url = std::string(buf_avatar, len_avatar);
+	SID = std::to_string(sid);
+    }
+    else
+    {
+	username = sendInfoPtr->username;
+	avatar_url = sendInfoPtr->avatar_url;
+	SID = sendInfoPtr->sid;
+    }
+    if(pushSessPtr)
+    {
+	auto* func = new std::function<void()>([pushSessPtr, sendUID, verMsg, username, avatar_url, SID](){
+	    json j;
+	    j["Requests_id"] = "125433701";
+	    j["Type"] = "PushNewFriendRequests";
+	    j["SID"] = SID; 
+	    j["UID"] = std::to_string(sendUID);
+	    j["Username"] = username;
+	    j["Avatar_Url"] = avatar_url;
+	    j["VerMsg"] = verMsg; 
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv{0, 0};
+	    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	}, func, &tv);
+    }
+}
+
+void ChatServerWorker::pushNewFriend(int64_t sendUID, int64_t pushUID)
+{
+    std::shared_ptr<userInfo> pushInfoPtr;
+    std::shared_ptr<userInfo> sendInfoPtr;
+
+    std::string sendUsername;
+    std::string sendSID;
+    std::string sendEmail;
+    std::string sendAvatar;
+    bool sendIsOnline = false;
+    std::string pushUsername;
+    std::string pushSID;
+    std::string pushEmail;
+    std::string pushAvatar;
+    bool pushIsOnline = false;
+    {
+	std::shared_lock lock(mutex_onlineUser);
+	auto it_push = onlineUser.find(pushUID);
+	auto it_send = onlineUser.find(sendUID);
+	if(it_push == onlineUser.end() && it_send == onlineUser.end())
+	    return;
+	if(it_push != onlineUser.end())
+	{
+	    pushInfoPtr = it_push->second;
+	    pushUsername = pushInfoPtr->username;
+	    pushAvatar = pushInfoPtr->avatar_url;
+	    pushEmail = pushInfoPtr->email;
+	    pushSID = pushInfoPtr->sid;
+	    pushIsOnline = true;
+	}
+	if(it_send != onlineUser.end())
+	{
+	    sendInfoPtr = it_send->second;
+	    sendUsername = sendInfoPtr->username;
+	    sendAvatar = sendInfoPtr->avatar_url;
+	    sendEmail = sendInfoPtr->email;
+	    sendSID = sendInfoPtr->sid;
+	    sendIsOnline = true;
+	}
+    }
+    if(!sendInfoPtr || !pushInfoPtr)
+    {
+	std::string sql = "SELECT id, username, email, avatar_url FROM user WHERE snowid = ?;";
+	MYSQL_BIND bind_param;
+	if(!sendInfoPtr && pushInfoPtr)
+	{
+	    initLongLongParam(&bind_param, &sendUID, sizeof(sendUID));
+	}
+	else if(sendInfoPtr && !pushInfoPtr)
+	{
+	    initLongLongParam(&bind_param, &pushUID, sizeof(pushUID));
+	}
+	MYSQL_BIND result_param[4];
+	int64_t sid;
+	unsigned long len_username = 0;
+	char buf_username[64*4];
+	unsigned long len_email = 0;
+	char buf_email[128*4];
+	unsigned long len_avatar = 0;
+	char buf_avatar[512*4];
+	initLongLongParam(&result_param[0], &sid, sizeof(sid));
+	initStringParam(&result_param[1], buf_username, sizeof(buf_username), &len_username);
+	initStringParam(&result_param[2], buf_email, sizeof(buf_email), &len_email);
+	initStringParam(&result_param[3], buf_avatar, sizeof(buf_avatar), &len_avatar);
+
+	SQL* con = SQLPool::getSQLPool()->getConn();
+	con->executeSql(sql, &bind_param, result_param);
+	if(con->nextData() != 1)
+	{
+	    SQLPool::getSQLPool()->backConn(con);
+	    logger.warn("Push New Friend Search DB Error/No Data");
+	    return;
+	}
+	if(!sendInfoPtr)
+	{
+	    sendUsername = std::string(buf_username, len_username);
+	    sendEmail = std::string(buf_email, len_email);
+	    sendAvatar = std::string(buf_avatar, len_avatar);
+	    sendSID = std::to_string(sid);
+	    sendIsOnline = false;
+	}
+	if(!pushInfoPtr)
+	{
+	    pushUsername = std::string(buf_username, len_username);
+	    pushEmail = std::string(buf_email, len_email);
+	    pushAvatar = std::string(buf_avatar, len_avatar);
+	    pushSID = std::to_string(sid);
+	    pushIsOnline = false;
+	}
+    }
+    std::shared_ptr<session> sendSessPtr;
+    std::shared_ptr<session> pushSessPtr;
+    {
+	std::shared_lock lock(mutex_onlineUser);
+	auto it_push = onlineUser.find(pushUID);
+	auto it_send = onlineUser.find(sendUID);
+	if(it_push == onlineUser.end() && it_send == onlineUser.end())
+	    return;
+	if(it_push != onlineUser.end())
+	    pushSessPtr = it_push->second->sessPtr.lock();
+	if(it_send != onlineUser.end())
+	    sendSessPtr = it_send->second->sessPtr.lock();
+    }
+    if(pushSessPtr)
+    {
+	auto* func = new std::function<void()>([pushSessPtr, sendUID, sendUsername, sendEmail, sendAvatar, sendSID, sendIsOnline](){
+	    json j;
+	    j["Requests_id"] = "125433702";
+	    j["Type"] = "PushNewFriend";
+	    j["SID"] = sendSID; 
+	    j["UID"] = std::to_string(sendUID);
+	    j["Username"] = sendUsername;
+	    j["Avatar_Url"] = sendAvatar;
+	    j["Email"] = sendEmail;
+	    j["IsOnline"] = sendIsOnline;
+	     
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv{0, 0};
+	    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	}, func, &tv);
+    }
+    if(sendSessPtr)
+    {
+	auto* func = new std::function<void()>([sendSessPtr, pushUID, pushUsername, pushEmail, pushAvatar, pushSID, pushIsOnline](){
+	    json j;
+	    j["Requests_id"] = "125433702";
+	    j["Type"] = "PushNewFriend";
+	    j["SID"] = pushSID; 
+	    j["UID"] = std::to_string(pushUID);
+	    j["Username"] = pushUsername;
+	    j["Avatar_Url"] = pushAvatar;
+	    j["Email"] = pushEmail;
+	    j["IsOnline"] = pushIsOnline;
+	     
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(sendSessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv{0, 0};
+	    event_base_once(sendSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	}, func, &tv);
+    }
+}
+
+void ChatServerWorker::pushFriendStatus(int64_t changeUID, bool isOnline)
+{
+    ThreadPool::getThreadPool()->addTask([changeUID, isOnline](){
+	std::string sql = "SELECT user.snowid FROM friendships JOIN user ON user.snowid = friendships.user_a WHERE friendships.status = 1 AND friendships.user_b = ? UNION ALL SELECT user.snowid FROM friendships JOIN user ON user.snowid = friendships.user_b WHERE friendships.status = 1 AND friendships.user_a = ?;";
+	MYSQL_BIND bind_param[2];
+	int64_t changeUID_ = changeUID;
+	initLongLongParam(&bind_param[0], &changeUID_, sizeof(changeUID_));
+	initLongLongParam(&bind_param[1], &changeUID_, sizeof(changeUID_));
+	
+	int64_t pushUID;
+	MYSQL_BIND result_param;
+	initLongLongParam(&result_param, &pushUID, sizeof(pushUID));
+	SQL* con = SQLPool::getSQLPool()->getConn();
+	con->executeSql(sql, bind_param, &result_param);
+	int ret = 0;
+	while((ret = con->nextData()) == 1)
+	{
+	    std::shared_lock lock(mutex_onlineUser);
+	    auto it_push = onlineUser.find(pushUID);
+	    if(it_push != onlineUser.end())
+	    {
+		std::shared_ptr<session> pushSessPtr = it_push->second->sessPtr.lock();
+		auto* func = new std::function<void()>([changeUID, isOnline, pushSessPtr](){
+		json j;
+		j["Requests_id"] = "125433703";
+		j["Type"] = "PushFriendStatus";
+		j["UID"] = std::to_string(changeUID);
+		j["IsOnline"] = isOnline;
+	     
+		std::string data = j.dump() + "\n";
+	    
+		bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
+		});
+		timeval tv{0, 0};
+		event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		    auto* func = static_cast<std::function<void()>*>(arg);
+		    (*func)();
+		    delete func;
+		}, func, &tv);
+	    }
+	}
+	if(ret < 0)
+	{
+	    SQLPool::getSQLPool()->backConn(con);
+	    logger.warn("PushFriendStatus Select DB Error");
+	    return;
+	}
+	SQLPool::getSQLPool()->backConn(con);
+    });
 }
 
 bool ChatServerWorker::isEmail(const std::string& email)
@@ -1252,10 +1752,23 @@ void ChatServerWorker::initStringParam(MYSQL_BIND* pargma, char* buf_string, siz
 {
     memset(pargma, 0, sizeof(*pargma));
     pargma->buffer_type = MYSQL_TYPE_STRING;
-    pargma->buffer = buf_string;
-    pargma->buffer_length = buffer_length;
-    if(length)
-	pargma->length = length;
+    if(buffer_length == 0 || buf_string == nullptr)
+    {
+	pargma->buffer = nullptr;
+	pargma->buffer_length = 0;
+	if(length)
+	{
+	    *length = 0;
+	    pargma->length = length;
+	}
+    }
+    else
+    {
+	pargma->buffer = buf_string;
+	pargma->buffer_length = buffer_length;
+	if(length)
+	    pargma->length = length;
+    }
 }
 
 void ChatServerWorker::initLongLongParam(MYSQL_BIND* pargma, int64_t* buf_longlong, size_t buffer_length)

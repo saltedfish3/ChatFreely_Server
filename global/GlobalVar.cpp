@@ -2,6 +2,7 @@
 
 std::atomic<bool> flag_shutdown = false;
 SnowflakeGen sfGen;
+std::shared_mutex mutex_onlineUser;
 std::unordered_map<int64_t, std::shared_ptr<userInfo>> onlineUser;
 std::atomic<int64_t> sid = 10000000000;
 std::string jwt_secret;

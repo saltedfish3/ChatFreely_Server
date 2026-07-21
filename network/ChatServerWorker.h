@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstdint>
 #include <event2/event.h>
+#include <event2/thread.h>
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
 #include <event2/util.h>
@@ -58,12 +59,6 @@
 class ChatServerWorker
 {
     using json = nlohmann::json;
-    struct session : public std::enable_shared_from_this<session>
-    {
-	ChatServerWorker* myself;
-	bufferevent* bev;
-	std::optional<int64_t> uid;
-    };
     static Logger logger;
 public:
     ChatServerWorker();
@@ -76,7 +71,7 @@ public:
 private:
     event_base* base;
     std::thread myThread;
-    //session
+    
     std::unordered_map<int, std::shared_ptr<session>> list_session;
     std::atomic<bool> is_run;
     void listen();
@@ -101,7 +96,15 @@ private:
     static void handleHandleNewFriendRequest(session* sess, std::string handle_uid, bool isAgree, std::string accessToken, const std::string requests_id);
     static void handleGetNewFriendRequestsList(session* sess, std::string accessToken, const std::string requests_id);
 
+    static void handleGetFriendList(session* sess, std::string accessToken, const std::string requests_id);
+
     static void handleRefreshToken(session* sess, std::string refreshToken, const std::string requests_id);
+
+    static void pushNewFriendRequests(int64_t sendUID, int64_t pushUID, const std::string& verMsg);
+
+    static void pushNewFriend(int64_t sendUID, int64_t pushUID);
+
+    static void pushFriendStatus(int64_t changeUID, bool isOnline);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);

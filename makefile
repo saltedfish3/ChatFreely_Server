@@ -11,7 +11,7 @@ INCLUDES = -I. \
 	   -I./logger
 
 # 链接库
-LIBS = -levent -lmysqlclient -lpthread -lsodium -lcrypto
+LIBS = -levent -lmysqlclient -lpthread -lsodium -lcrypto -levent_pthreads
 
 # 输出目录和目标
 BUILD_DIR = build
