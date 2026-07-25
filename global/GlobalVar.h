@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <random>
@@ -13,6 +14,7 @@
 #include <sodium/crypto_hash_sha256.h>
 #include <sodium/utils.h>
 #include "../third_party/snowflake.hpp"
+#include "../third_party/json.hpp"
 
 #define SPort 9000
 #define UploadPort 9001
@@ -39,9 +41,14 @@ struct userInfo {
     std::weak_ptr<session> sessPtr;
 };
 
+struct idempotentRecord
+{
+    nlohmann::json j;
+    std::chrono::steady_clock::time_point expiredTime;
+};
+
 extern std::shared_mutex mutex_onlineUser;
 extern std::unordered_map<int64_t, std::shared_ptr<userInfo>> onlineUser;
-extern std::atomic<int64_t> sid;
 extern std::string jwt_secret;
 class GlobalTools
 {

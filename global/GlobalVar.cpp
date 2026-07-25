@@ -1,10 +1,12 @@
 #include "GlobalVar.h"
+#include <chrono>
 
 std::atomic<bool> flag_shutdown = false;
 SnowflakeGen sfGen;
 std::shared_mutex mutex_onlineUser;
 std::unordered_map<int64_t, std::shared_ptr<userInfo>> onlineUser;
-std::atomic<int64_t> sid = 10000000000;
+std::shared_mutex mutex_idempotentCache;
+std::unordered_map<std::string, idempotentRecord> idempotentCache;
 std::string jwt_secret;
 
 int64_t GlobalTools::verifyAccessToken(const std::string& accessToken)
@@ -35,4 +37,3 @@ std::string GlobalTools::sha256(const std::string& input)
     sodium_bin2hex(hex, sizeof(hex), hash, sizeof(hash));
     return std::string(hex, 64);
 }
-

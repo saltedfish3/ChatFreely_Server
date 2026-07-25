@@ -74,6 +74,9 @@ private:
     
     std::unordered_map<int, std::shared_ptr<session>> list_session;
     std::atomic<bool> is_run;
+    std::shared_mutex mutex_idempotentCache;
+    std::unordered_map<std::string, idempotentRecord> idempotentCache;
+
     void listen();
         
     static void cb_read(bufferevent* bev, void* arg);
@@ -87,7 +90,6 @@ private:
     static void handleLogin(session* sess, std::string email, std::string password, const std::string requests_id);
     static void handleAccessTokenLogin(session* sess, std::string accessToken, const std::string requests_id);
     static void handleRegister(session* sess, std::string email, std::string password, std::string username, const std::string requests_id);
-    static void handleSend(bufferevent* bev, const std::string requests_id);
     static void handleUploadAvatar(session* sess, std::string url, std::string accessToken, const std::string requests_id);
     static void handleUnLogin(session* sess, std::string accessToken, const std::string requests_id);
     static void handleUpdateUsername(session* sess, std::string username, std::string accessToken, const std::string requests_id);
@@ -98,6 +100,8 @@ private:
 
     static void handleGetFriendList(session* sess, std::string accessToken, const std::string requests_id);
 
+    static void handleSendMessage(session* sess, std::string accessToken, std::string receiverUID, const std::string content, const std::string tempmsgid, const std::string requests_id);
+
     static void handleRefreshToken(session* sess, std::string refreshToken, const std::string requests_id);
 
     static void pushNewFriendRequests(int64_t sendUID, int64_t pushUID, const std::string& verMsg);
@@ -105,6 +109,8 @@ private:
     static void pushNewFriend(int64_t sendUID, int64_t pushUID);
 
     static void pushFriendStatus(int64_t changeUID, bool isOnline);
+
+    static void pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, const std::string& content);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);
@@ -119,4 +125,8 @@ private:
 
     static std::string createAccessToken(int64_t uid, const std::chrono::seconds& expire_duration = std::chrono::minutes(45));
     static std::pair<std::string, std::string> createRefreshToken();
+    void setCache(const std::string& requests_id, const json& responseJson, int seconds);
+    bool tryGetCache(const std::string& requests_id, json& outJson);
+    void cleanExpiredCache();
+
 };
