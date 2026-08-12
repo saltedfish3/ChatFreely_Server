@@ -19,6 +19,7 @@
 #define SPort 9000
 #define UploadPort 9001
 #define AppName "ChatFreely"
+#define MAX_CACHE_SIZE 10000
 
 extern std::atomic<bool> flag_shutdown;
 using SnowflakeGen = snowflake<1704067200000LL, std::mutex>;
@@ -31,6 +32,7 @@ struct session : public std::enable_shared_from_this<session>
    ChatServerWorker* myself;
    bufferevent* bev;
    std::optional<int64_t> uid;
+   std::weak_ptr<session> weak_self;
 };
 
 struct userInfo {

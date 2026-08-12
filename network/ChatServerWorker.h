@@ -27,6 +27,8 @@
 #include "../third_party/snowflake.hpp"
 #include "../thread/ThreadPool.h"
 #include "../sql/SQLPool.h"
+#include "../sql/SQLTransaction.h"
+#include "../sql/GuardConnect.h"
 #include "../logger/Logger.h"
 
 //Message Type(client)
@@ -110,7 +112,11 @@ private:
 
     static void pushFriendStatus(int64_t changeUID, bool isOnline);
 
-    static void pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, const std::string& content);
+    static void pushFriendUsername(int64_t changeUID, const std::string& username);
+
+    static void pushFriendAvatar(int64_t changeUID, const std::string& avatar);
+
+    static void pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, const std::string& content, int64_t convSeq);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);

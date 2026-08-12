@@ -2,6 +2,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <queue>
 #include <stdexcept>
 #include <thread>
 
@@ -26,30 +28,22 @@ SQLPool::SQLPool()
 
 SQLPool::~SQLPool()
 {
+    flag_shutdown.store(true, std::memory_order_release);
+
     this->cv.notify_all();
     this->cv_manage.notify_all();
 
     if(this->thread_manager.joinable())
 	this->thread_manager.join();
 
-    std::unique_lock<std::mutex> lock(this->mutex_ListCon);
-    if(!this->cv.wait_for(lock,std::chrono::seconds(10),[this](){
-	return this->list_busyCon.empty();
-	    }))
     {
-	std::cerr << "~SQLPool error\n";
+	std::unique_lock<std::mutex> lock(this->mutex_ListCon);
+	while(!this->list_con.empty())
+	{
+	    this->list_con.pop();
+	}
     }
-    lock.unlock();
-
-    while (!this->list_con.empty()) 
-    {
-	delete this->list_con.front();
-	this->list_con.pop();
-    }
-    for (auto* conn : list_busyCon) {
-        delete conn;
-    }
-    list_busyCon.clear();
+    this->list_busyCon.clear();
 }
 
 void SQLPool::loadConfig(const char* filePath, size_t retryTime)
@@ -158,7 +152,9 @@ bool SQLPool::createSQL(uint retryTime)
     thread_local static std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<int> alive(this->min_alive,this->max_alive);
     std::uniform_int_distribution<int> free_time(this->min_free,this->max_free);
-    SQL* con = new SQL(alive(gen), free_time(gen));
+
+    auto con = std::make_shared<SQL>(alive(gen), free_time(gen));
+
     uint i = 0;
     bool isNormal = false;
     for(i = 0; i < retryTime + 1; i++)
@@ -175,7 +171,6 @@ bool SQLPool::createSQL(uint retryTime)
     if((i >= retryTime && (!isNormal || !con->ping())) || 
 	    this->list_busyCon.size() + this->list_con.size() >= this->maxconn_size)
     {
-	delete con;
 	return false;
     }
 
@@ -189,25 +184,26 @@ SQLPool* SQLPool::getSQLPool()
     return &pool;
 }
 
-SQL* SQLPool::getConn()
+std::shared_ptr<SQL> SQLPool::getConn()
 {
     while(!flag_shutdown)
     {
 	std::unique_lock<std::mutex> lock(this->mutex_ListCon);
+	std::queue<std::shared_ptr<SQL>> valid_connections;
+
 	while(!this->list_con.empty())
 	{
-	    if(!this->list_con.front()->isAlive() || !this->list_con.front()->ping())
-	    {
-		delete this->list_con.front();
-		this->list_con.pop();
-	    }
-	    else
-		break;
+	    auto conn =  this->list_con.front();
+	    this->list_con.pop();
+
+	    if(conn->isAlive() && conn->ping())
+		valid_connections.push(conn);
 	}
+	this->list_con = std::move(valid_connections);
     
 	if(!this->list_con.empty())
 	{
-	    SQL* conn = this->list_con.front();
+	    auto conn = this->list_con.front();
 	    this->list_con.pop();
 	    this->list_busyCon.insert(conn);
 	    return conn;
@@ -228,18 +224,16 @@ SQL* SQLPool::getConn()
 	this->cv.wait(lock, [this](){
 	    return !this->list_con.empty() || (this->list_con.size() + this->list_busyCon.size()) < this->maxconn_size || flag_shutdown;
 	    });
-	continue;
     }
     return nullptr;
 }
 
-void SQLPool::backConn(SQL* conn)
+void SQLPool::backConn(std::shared_ptr<SQL> conn)
 {
     if(!conn->isAlive() || !conn->ping())
     {
 	std::lock_guard<std::mutex> lock(this->mutex_ListCon);
 	this->list_busyCon.erase(conn);
-	delete conn;
 	cv.notify_one();
 	return;
     }
@@ -256,6 +250,7 @@ void SQLPool::manage()
     {
 	{
             std::unique_lock<std::mutex> lock(this->mutex_ListCon);
+
             this->cv_manage.wait_for(lock, std::chrono::seconds(10), [this](){
                 return flag_shutdown.load();
             });
@@ -265,11 +260,16 @@ void SQLPool::manage()
 	//check alive/free time
 	{
 	    std::lock_guard<std::mutex> lock(this->mutex_ListCon);
-	    while(!this->list_con.empty() && (!this->list_con.front()->isAlive() || this->list_con.front()->isOverFree() || !this->list_con.front()->ping()))
+	    std::queue<std::shared_ptr<SQL>> valid_connections;
+	    while(!this->list_con.empty())
 	    {
-		delete this->list_con.front();
+		auto conn = this->list_con.front();
 		this->list_con.pop();
+
+		if(conn->isAlive() && !conn->isOverFree() && conn->ping())
+		    valid_connections.push(conn);
 	    }
+	    this->list_con = std::move(valid_connections);
 	}
 
 	//check < min_conn

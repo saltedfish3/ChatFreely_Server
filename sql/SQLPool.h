@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <iostream>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <random>
@@ -24,8 +25,8 @@ class SQLPool
     static Logger logger;
 public:
     static SQLPool* getSQLPool();
-    SQL* getConn();
-    void backConn(SQL* conn);
+    std::shared_ptr<SQL> getConn();
+    void backConn(std::shared_ptr<SQL> conn);
     ~SQLPool();
 private:
     SQLPool();
@@ -47,8 +48,8 @@ private:
     size_t max_free;
     size_t min_free;
 
-    std::queue<SQL*> list_con;
-    std::unordered_set<SQL*> list_busyCon;
+    std::queue<std::shared_ptr<SQL>> list_con;
+    std::unordered_set<std::shared_ptr<SQL>> list_busyCon;
     std::mutex mutex_ListCon;
     std::condition_variable cv;
     std::condition_variable cv_manage;

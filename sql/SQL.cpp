@@ -204,3 +204,8 @@ bool SQL::ping()
 	return false;
     return !mysql_ping(this->mysql);
 }
+
+MYSQL* SQL::getMysql()
+{
+    return this->mysql;
+}

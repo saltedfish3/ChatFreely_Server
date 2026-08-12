@@ -24,6 +24,8 @@ SRCS = ChatServer.cpp \
        network/ChatServerUploadWorker.cpp \
        sql/SQL.cpp \
        sql/SQLPool.cpp \
+       sql/GuardConnect.cpp \
+       sql/SQLTransaction.cpp \
        global/GlobalVar.cpp \
        thread/ThreadPool.cpp \
        logger/Logger.cpp
