@@ -23,6 +23,7 @@ SQLPool::SQLPool()
 	if(!createSQL(5))
 	    throw std::runtime_error("createSQL Error exit");
     }
+    initGlobalSeq();
     this->thread_manager = std::thread(&SQLPool::manage,this);
 }
 
@@ -134,6 +135,19 @@ void SQLPool::writeConfig(const char* filePath)
     ofs << "max_freeTimeMinutes = 40\r\n";
     ofs.flush();
     ofs.close();
+}
+
+void SQLPool::initGlobalSeq()
+{
+    std::shared_ptr<SQL> con = getConn();
+    std::string sql = "INSERT IGNORE INTO global_seq(seq_name, current_value) VALUES('conv_sync', 0);";
+    if(!con->executeSql(sql, nullptr))
+    {
+	this->backConn(con);
+	throw std::runtime_error("初始化global_seq失败");
+	return;
+    }
+    this->backConn(con);
 }
 
 void SQLPool::trim(std::string& str)

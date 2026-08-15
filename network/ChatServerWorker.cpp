@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 Logger ChatServerWorker::logger("worker");
 
@@ -367,6 +368,34 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	    return;
 	}
 	handleSendMessage(sess, j.value("AccessToken", ""), j.value("ReceiverUID", ""), j.value("Content", ""), j.value("TempMsgID", ""), requests_id.str());
+    }
+    else if(type == "GetConversationsFriendUIDListAndSeq")
+    {
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
+	{
+	    logger.warn("Json No AccessToken");
+	    return;
+	}
+	if(!j.contains("SyncConvSeq") || !j["SyncConvSeq"].is_number())
+	{
+	    logger.warn("Json No Param");
+	    return;
+	}
+	handleGetConversationsFriendUIDListAndSeq(sess, j.value("AccessToken", ""), j.value<int64_t>("SyncConvSeq", 0), requests_id.str());
+    }
+    else if(type == "SyncNewMessages")
+    {
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
+	{
+	    logger.warn("Json No AccessToken");
+	    return;
+	}
+	if(!j.contains("FriendUID") || !j["FriendUID"].is_string() || !j.contains("StartConvSeq") || !j["StartConvSeq"].is_number() || !j.contains("Limit") || !j["Limit"].is_number())
+	{
+	    logger.warn("Json No Param");
+	    return;
+	}
+	handleSyncMessages(sess, j.value("AccessToken", ""), j.value("FriendUID", ""), j.value<int64_t>("StartConvSeq", 0), j.value<int64_t>("Limit", 0), requests_id.str());
     }
     else
     {
@@ -1985,8 +2014,8 @@ void ChatServerWorker::pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t 
 	    j["SenderUID"] = std::to_string(sendUID);
 	    j["MessageID"] = std::to_string(messageID);
 	    j["Content"] = content;
-	    j["TimeStamp"] = timestamp;
-	    j["ConvSeq"] = convSeq;
+	    j["TimeStamp"] = std::to_string(timestamp);
+	    j["ConvSeq"] = std::to_string(convSeq);
 	     
 	    std::string data = j.dump() + "\n";
 	    
@@ -2019,14 +2048,14 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 
 	if(!isCache && uidValid && isUID(receiverUID))
 	{
-	    GuardConnection con_guard(SQLPool::getSQLPool());
-	    if(!con_guard)
+	    GuardConnection con(SQLPool::getSQLPool());
+	    if(!con)
 		info = "发送消息失败";
 	    else
 	    {
-		SQL* con = con_guard.get();
+		SQL* con_ = con.get();
 		{
-		    SQLTransaction sqlTrans(con->getMysql());
+		    SQLTransaction sqlTrans(con_->getMysql());
 
 		    std::string sql = "SELECT id, status, lastaction_uid FROM friendships WHERE user_a = LEAST(?, ?) AND user_b = GREATEST(?, ?);";
 		    int64_t friendUID = std::stoll(receiverUID);
@@ -2061,46 +2090,84 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 			    info = "您和对方还不是好友";
 		    }
 		    else
-		    {   
-			std::string sql1 = "SELECT COALESCE(MAX(conv_seq), 0) FROM messages WHERE conversation_id = ? FOR UPDATE;";
+		    {  
+			int64_t uid = sessPtr->uid.value();
+			std::string sql_insert = "INSERT IGNORE INTO conversation_seq(conversation_id, last_conv_seq) VALUES(?, 0);";
+			std::string sql1 = "UPDATE conversation_seq SET last_conv_seq = LAST_INSERT_ID(last_conv_seq + 1) WHERE conversation_id = ?;";
 			MYSQL_BIND bind_param1;
 			initLongLongParam(&bind_param1, &conversationID, sizeof(conversationID));
 		
 			int64_t conv_seq = 0;
-			MYSQL_BIND result_param1;
-			initLongLongParam(&result_param1, &conv_seq, sizeof(conv_seq));
-
-			con->executeSql(sql1, &bind_param1, &result_param1);
-			if(con->nextData() != 1)
+			
+			if(!con->executeSql(sql_insert, &bind_param1) || !con->executeSql(sql1, &bind_param1) || con->getAffectRows() <= 0)
 			{
 			    logger.warn("Send Message SELECT Error");
 			    info = "发送失败，请稍后重试";
 			}
 			else
 			{
-			    nextSeq = conv_seq + 1;
-			    std::string sql2 = "INSERT INTO messages(snowid, conversation_id, conv_seq, sender_id, content, idempotent_key) VALUES(?, ?, ?, ?, ?, ?);";
-			    MYSQL_BIND bind_param2[6];
-			    initLongLongParam(&bind_param2[0], &id, sizeof(id));
-			    initLongLongParam(&bind_param2[1], &conversationID, sizeof(conversationID));
-			    initLongLongParam(&bind_param2[2], &nextSeq, sizeof(nextSeq));
-			    initLongLongParam(&bind_param2[3], &senderUID, sizeof(senderUID));
-			    unsigned long len_message = content.size();
-			    initStringParam(&bind_param2[4], (char*)content.data(), content.size(), &len_message);
-			    unsigned long len_idempotent = idempotentKey.size();
-			    initStringParam(&bind_param2[5], (char*)idempotentKey.data(), idempotentKey.size(), &len_idempotent);
-
-			    con->executeSql(sql2, bind_param2);
-			    if(con->getAffectRows() > 0)
+			    conv_seq = con->getInsertID();
+			    std::string sql_updateGlobalSeq = "UPDATE global_seq SET current_value = LAST_INSERT_ID(current_value + 1) WHERE seq_name = 'conv_sync';";
+			    if(con->executeSql(sql_updateGlobalSeq, nullptr) && con->getAffectRows() > 0)
 			    {
-				sqlTrans.commit();
-				result = true;
-				timestamp = ((id >> 22) + 1704067200000LL) / 1000; 
-				pushNewMessage(senderUID, friendUID, id, timestamp, content, nextSeq);
+				int64_t newGlobalSeq = con->getInsertID();
+
+				std::string sql_insertConversations_myself = "INSERT INTO conversations(uid, conversation_id, last_seq) VALUES(?, ?, ?) ON DUPLICATE KEY UPDATE last_seq = VALUES(last_seq);";
+				MYSQL_BIND bind_param_insertConversations_myself[3];
+				initLongLongParam(&bind_param_insertConversations_myself[0], &uid, sizeof(uid));
+				initLongLongParam(&bind_param_insertConversations_myself[1], &conversationID, sizeof(conversationID));
+				initLongLongParam(&bind_param_insertConversations_myself[2], &newGlobalSeq, sizeof(newGlobalSeq));
+				    
+				std::string sql_insertConversations_friend = "INSERT INTO conversations(uid, conversation_id, last_seq) VALUES(?, ?, ?) ON DUPLICATE KEY UPDATE last_seq = VALUES(last_seq);";
+				MYSQL_BIND bind_param_insertConversations_friend[3];
+				initLongLongParam(&bind_param_insertConversations_friend[0], &friendUID, sizeof(friendUID));
+				initLongLongParam(&bind_param_insertConversations_friend[1], &conversationID, sizeof(conversationID));
+				initLongLongParam(&bind_param_insertConversations_friend[2], &newGlobalSeq, sizeof(newGlobalSeq));
+				    
+				if(con->executeSql(sql_insertConversations_myself, bind_param_insertConversations_myself) && con->getAffectRows() > 0 && con->executeSql(sql_insertConversations_friend, bind_param_insertConversations_friend) && con->getAffectRows() > 0)
+				{
+				    nextSeq = conv_seq;
+				    std::string sql2 = "INSERT INTO messages(snowid, conversation_id, conv_seq, sender_id, content, idempotent_key, timestamp) VALUES(?, ?, ?, ?, ?, ?, ?);";
+				    MYSQL_BIND bind_param2[7];
+				    initLongLongParam(&bind_param2[0], &id, sizeof(id));
+				    initLongLongParam(&bind_param2[1], &conversationID, sizeof(conversationID));
+				    initLongLongParam(&bind_param2[2], &nextSeq, sizeof(nextSeq));
+				    initLongLongParam(&bind_param2[3], &senderUID, sizeof(senderUID));
+
+				    std::string truncContent;
+				    if(content.size() > 10000)
+					truncContent = content.substr(0, 10000);
+				    else
+					truncContent = content;
+				    unsigned long len_message = truncContent.size();
+				    initStringParam(&bind_param2[4], (char*)truncContent.data(), truncContent.size(), &len_message);
+				    unsigned long len_idempotent = idempotentKey.size();
+				    initStringParam(&bind_param2[5], (char*)idempotentKey.data(), idempotentKey.size(), &len_idempotent);
+				    timestamp = ((id >> 22) + 1704067200000LL) / 1000; 
+				    initLongLongParam(&bind_param2[6], &timestamp, sizeof(timestamp));
+
+				    con->executeSql(sql2, bind_param2);
+				    if(con->getAffectRows() > 0)
+				    {
+					sqlTrans.commit();
+					result = true;
+					pushNewMessage(senderUID, friendUID, id, timestamp, truncContent, nextSeq);
+				    }
+				    else
+				    {
+					logger.warn("SendMessage INSERT Error");
+					info = "发送失败，请稍后重试";
+				    }
+				}
+				else
+				{
+				    logger.warn("Send Message INSERT conversations Error");
+				    info = "发送失败，请稍后重试";
+				}
 			    }
 			    else
 			    {
-				logger.warn("SendMessage INSERT Error");
+				logger.warn("Send Message UPDATE global_seq Error");
 				info = "发送失败，请稍后重试";
 			    }
 			}
@@ -2124,8 +2191,8 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 		if(result)
 		{
 		    j["MessageID"] = std::to_string(id);
-		    j["TimeStamp"] = timestamp;
-		    j["ConvSeq"] = nextSeq;
+		    j["TimeStamp"] = std::to_string(timestamp);
+		    j["ConvSeq"] = std::to_string(nextSeq);
 		}
 		else
 		{
@@ -2152,6 +2219,269 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 	    delete func;
 	}, func, &tv);
     });
+}
+
+void ChatServerWorker::handleGetConversationsFriendUIDListAndSeq(session* sess, std::string accessToken, int64_t lastConvSyncSeq, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([accessToken, requests_id, sessPtr, lastConvSyncSeq](){
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && sessPtr->uid.value() == uid_token && uid_token != -1;
+	json arr = json::array();
+	
+	bool result = false;
+	int64_t current_value = 0;
+	if(uidValid)
+	{
+	    std::string sql_selectGlobalSeq = "SELECT current_value FROM global_seq WHERE seq_name = 'conv_sync';";
+	    GuardConnection con(SQLPool::getSQLPool());
+	    MYSQL_BIND bind_selectGlobalSeq;
+	    initLongLongParam(&bind_selectGlobalSeq, &current_value, sizeof(current_value));
+
+	    if(con->executeSql(sql_selectGlobalSeq, nullptr, &bind_selectGlobalSeq) && con->nextData() > 0)
+	    {
+		int64_t uid = sessPtr->uid.value();
+		std::string sql_selectFriendUID = "SELECT IF(f.user_a = ?, f.user_b, f.user_a) AS friend_uid FROM conversations c JOIN friendships f ON f.id = c.conversation_id WHERE uid = ? AND last_seq > ? ORDER BY last_seq DESC;";
+
+		MYSQL_BIND bind_selectFriendUID[3];
+		initLongLongParam(&bind_selectFriendUID[0], &uid, sizeof(uid));
+		initLongLongParam(&bind_selectFriendUID[1], &uid, sizeof(uid));
+		int64_t lastConvSyncSeq_copy = lastConvSyncSeq;
+		initLongLongParam(&bind_selectFriendUID[2], &lastConvSyncSeq_copy, sizeof(lastConvSyncSeq_copy));
+
+		MYSQL_BIND result_selectFriendUID;
+		int64_t conversationID = 0;
+		initLongLongParam(&result_selectFriendUID, &conversationID, sizeof(conversationID));
+		
+		if(con->executeSql(sql_selectFriendUID, bind_selectFriendUID, &result_selectFriendUID))
+		{
+		    int ret = 0;
+		    while((ret = con->nextData()) > 0)
+			arr.push_back(std::to_string(conversationID));
+
+		    result = true;
+		    if(ret == -1)
+		    {
+			logger.warn("Select最新会话ID错误");
+			result = false;
+		    }
+		}
+	    }
+	}
+	
+	auto* func = new std::function<void()>([sessPtr, result, requests_id, uidValid, current_value, arr](){
+	    json j;
+	    j["Requests_id"] = requests_id;
+	    j["Type"] = "GetConversationsFriendUIDListAndSeqResp";
+	    j["Result"] = result;
+	    if(result)
+	    {
+		j["NewGlobalSeq"] = std::to_string(current_value);
+		j["FriendUIDArray"] = arr;
+	    }
+	    else
+	    {
+		if(!uidValid)
+		    j["AccessTokenExpired"] = true;
+	    }
+	     
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	});
+	timeval tv{0, 0};
+	event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	    auto* func = static_cast<std::function<void()>*>(arg);
+	    (*func)();
+	    delete func;
+	}, func, &tv);
+    });
+}
+
+void ChatServerWorker::handleSyncMessages(session* sess, std::string accessToken, const std::string friendUID, int64_t startConvSeq, int limit, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([accessToken, requests_id, sessPtr, friendUID, startConvSeq, limit](){
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && sessPtr->uid.value() == uid_token && uid_token != -1;
+	bool result = false;
+	json arr = json::array();
+	if(uidValid)
+	{
+	    std::string sql_selectFriendConversation = "SELECT id FROM friendships WHERE user_a = LEAST(?, ?) AND user_b = GREATEST(?, ?) AND status = 1;";
+	    int64_t friendUID_int = std::stoll(friendUID);
+	    int64_t uid = sessPtr->uid.value();
+	    int64_t conversationID = 0;
+	    std::string sql = "SELECT snowid, conv_seq, sender_id, content, timestamp FROM messages WHERE conversation_id = ? AND conv_seq > ? ORDER BY conv_seq ASC LIMIT ?;";
+	    
+	    MYSQL_BIND bind_selectFriendUID[4];
+	    initLongLongParam(&bind_selectFriendUID[0], &friendUID_int, sizeof(friendUID_int));
+	    initLongLongParam(&bind_selectFriendUID[1], &uid, sizeof(uid));
+	    initLongLongParam(&bind_selectFriendUID[2], &friendUID_int, sizeof(friendUID_int));
+	    initLongLongParam(&bind_selectFriendUID[3], &uid, sizeof(uid));
+
+	    MYSQL_BIND result_selectFriendUID;
+	    initLongLongParam(&result_selectFriendUID, &conversationID, sizeof(conversationID));
+	    GuardConnection con(SQLPool::getSQLPool());
+
+	    if(con->executeSql(sql_selectFriendConversation, bind_selectFriendUID, &result_selectFriendUID) && con->nextData() > 0)
+	    {
+		MYSQL_BIND bind_selectMessage[3];
+		int64_t startConvSeq_copy = startConvSeq;
+		int limit_copy = limit;
+		initLongLongParam(&bind_selectMessage[0], &conversationID, sizeof(conversationID));
+		initLongLongParam(&bind_selectMessage[1], &startConvSeq_copy, sizeof(startConvSeq_copy));
+		initIntParam(&bind_selectMessage[2], &limit_copy, sizeof(limit_copy));
+	    
+		MYSQL_BIND result_selectMessage[5];
+		int64_t result_messageID = 0;
+		int64_t result_convSeq = 0;
+		int64_t result_senderID = 0;
+		char result_buf_content[10000 * 4 + 1];
+		unsigned long len_content = 0;
+		int64_t result_timestamp = 0;
+		initLongLongParam(&result_selectMessage[0], &result_messageID, sizeof(result_messageID));
+		initLongLongParam(&result_selectMessage[1], &result_convSeq, sizeof(result_convSeq));
+		initLongLongParam(&result_selectMessage[2], &result_senderID, sizeof(result_senderID));
+		initStringParam(&result_selectMessage[3], result_buf_content, sizeof(result_buf_content), &len_content);
+		initLongLongParam(&result_selectMessage[4], &result_timestamp, sizeof(result_timestamp));
+
+		if(con->executeSql(sql, bind_selectMessage, result_selectMessage))
+		{
+		    int count = 0;
+		    int ret = 0;
+		    while((ret = con->nextData()) > 0)
+		    {
+			std::string content(result_buf_content, len_content);
+			len_content = 0;
+			json item;
+			item["MessageID"] = std::to_string(result_messageID);
+			item["ConvSeq"] = std::to_string(result_convSeq);
+			item["SenderUID"] = std::to_string(result_senderID);
+			item["Content"] = content;
+			item["Timestamp"] = std::to_string(result_timestamp);
+			arr.push_back(item);
+			count++;
+			if(count >= limit)
+			{
+			    json j;
+			    j["Requests_id"] = requests_id;
+			    j["Type"] = "SyncNewMessagesResp";
+			    j["Result"] = true;
+			    j["FriendUID"] = friendUID;
+			    j["Messages"] = arr;
+		    
+			    {
+				std::lock_guard<std::mutex> lock(sessPtr->mutex_sendQueue);
+				sessPtr->sendQueue.push(j.dump() + "\n");
+			    }
+			    sessPtr->myself->handleSendQueueTask(sessPtr);
+			
+			    arr.clear();
+			    count = 0;
+
+			}
+			result = true;
+		    }
+
+		    if(ret < 0)
+		    {
+			result = false;
+			logger.warn("查询消息错误");
+		    }
+		    else
+		    {
+			result = true;
+			json j;
+			j["Requests_id"] = requests_id;
+			j["Type"] = "SyncNewMessagesResp";
+			j["Result"] = true;
+			j["FriendUID"] = friendUID;
+			j["Messages"] = arr;
+			{
+			    std::lock_guard<std::mutex> lock(sessPtr->mutex_sendQueue);
+			    sessPtr->sendQueue.push(j.dump() + "\n");
+			}
+			sessPtr->myself->handleSendQueueTask(sessPtr);
+		    }
+		}
+		else
+		    logger.warn("同步消息执行sql失败");
+	    }
+	    else
+		logger.warn("同步消息SELECT 好友会话ID失败");
+	    if(result)
+	    {
+		json j;
+		j["Requests_id"] = requests_id;
+		j["Type"] = "SyncNewMessagesResp";
+		j["Result"] = true;
+		j["FriendUID"] = friendUID;
+		arr.clear();
+		j["Messages"] = arr;
+		{
+		    std::lock_guard<std::mutex> lock(sessPtr->mutex_sendQueue);
+		    sessPtr->sendQueue.push(j.dump() + "\n");
+		}
+		sessPtr->myself->handleSendQueueTask(sessPtr);
+		return;
+	    }
+	}
+
+	auto* func = new std::function<void()>([sessPtr, result, requests_id, uidValid, friendUID](){
+	    json j;
+	    j["Requests_id"] = requests_id;
+	    j["Type"] = "SyncNewMessagesResp";
+	    j["Result"] = result;
+	    j["FriendUID"] = friendUID;
+	    if(!result)
+	    {
+		if(!uidValid)
+		    j["AccessTokenExpired"] = true;
+	    }
+	     
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	});
+	timeval tv{0, 0};
+	event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	    auto* func = static_cast<std::function<void()>*>(arg);
+	    (*func)();
+	    delete func;
+	}, func, &tv);
+    });
+}
+
+void ChatServerWorker::handleSendQueueTask(std::shared_ptr<session> sessPtr)
+{
+    bool isRunning = false;
+    if(!sessPtr->isQueueRunning.compare_exchange_strong(isRunning, true))
+	return;
+
+    auto* func = new std::function<void()>([sessPtr](){
+	while(true)
+	{
+	    std::string data;
+	    {
+		std::lock_guard<std::mutex> lock(sessPtr->mutex_sendQueue);
+		if(sessPtr->sendQueue.empty())
+		{
+		    sessPtr->isQueueRunning = false;
+		    break;
+		}
+		data = sessPtr->sendQueue.front();
+		sessPtr->sendQueue.pop();
+	    }
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	}
+    });
+    timeval tv{0, 0};
+    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+    auto* func = static_cast<std::function<void()>*>(arg);
+	(*func)();
+	delete func;
+    }, func, &tv);
 }
 
 bool ChatServerWorker::isEmail(const std::string& email)
@@ -2229,6 +2559,14 @@ void ChatServerWorker::initTinyIntParam(MYSQL_BIND* pargma, int8_t* buf_tinyint,
     memset(pargma, 0, sizeof(*pargma));
     pargma->buffer_type = MYSQL_TYPE_TINY;
     pargma->buffer = buf_tinyint;
+    pargma->buffer_length = buffer_length;
+}
+
+void ChatServerWorker::initIntParam(MYSQL_BIND* pargma, int* buf_int, size_t buffer_length)
+{
+    memset(pargma, 0, sizeof(*pargma));
+    pargma->buffer_type = MYSQL_TYPE_LONG;
+    pargma->buffer = buf_int;
     pargma->buffer_length = buffer_length;
 }
 

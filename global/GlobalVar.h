@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <queue>
 #include <random>
 #include <shared_mutex>
 #include <unordered_map>
@@ -33,6 +34,10 @@ struct session : public std::enable_shared_from_this<session>
    bufferevent* bev;
    std::optional<int64_t> uid;
    std::weak_ptr<session> weak_self;
+
+   std::queue<std::string> sendQueue;
+   std::mutex mutex_sendQueue;
+   std::atomic<bool> isQueueRunning = false;
 };
 
 struct userInfo {

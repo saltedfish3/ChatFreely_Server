@@ -102,6 +102,10 @@ private:
 
     static void handleGetFriendList(session* sess, std::string accessToken, const std::string requests_id);
 
+    static void handleGetConversationsFriendUIDListAndSeq(session* sess, std::string accessToken, int64_t lastConvSyncSeq, const std::string requests_id);
+
+    static void handleSyncMessages(session* sess, std::string accessToken, const std::string friendUID, int64_t startConvSeq, int limit, const std::string requests_id);
+
     static void handleSendMessage(session* sess, std::string accessToken, std::string receiverUID, const std::string content, const std::string tempmsgid, const std::string requests_id);
 
     static void handleRefreshToken(session* sess, std::string refreshToken, const std::string requests_id);
@@ -128,11 +132,14 @@ private:
     static void initStringParam(MYSQL_BIND* pargma, char* buf_string, size_t buffer_length, unsigned long* length);
     static void initLongLongParam(MYSQL_BIND* pargma, int64_t* buf_longlong, size_t buffer_length);
     static void initTinyIntParam(MYSQL_BIND* pargma, int8_t* buf_tinyint, size_t buffer_length);
+    static void initIntParam(MYSQL_BIND* pargma, int* buf_int, size_t buffer_length);
 
     static std::string createAccessToken(int64_t uid, const std::chrono::seconds& expire_duration = std::chrono::minutes(45));
     static std::pair<std::string, std::string> createRefreshToken();
     void setCache(const std::string& requests_id, const json& responseJson, int seconds);
     bool tryGetCache(const std::string& requests_id, json& outJson);
     void cleanExpiredCache();
+
+    void handleSendQueueTask(std::shared_ptr<session> sessPtr);
 
 };

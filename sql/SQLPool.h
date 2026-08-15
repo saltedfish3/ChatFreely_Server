@@ -32,6 +32,7 @@ private:
     SQLPool();
     void loadConfig(const char* filePath, size_t retryTime);
     void writeConfig(const char* filePath);
+    void initGlobalSeq();
     bool createSQL(uint retryTime);
     void trim(std::string& str);
     void manage();
