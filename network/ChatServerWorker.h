@@ -106,7 +106,7 @@ private:
 
     static void handleSyncMessages(session* sess, std::string accessToken, const std::string friendUID, int64_t startConvSeq, int limit, const std::string requests_id);
 
-    static void handleSendMessage(session* sess, std::string accessToken, std::string receiverUID, const std::string content, const std::string tempmsgid, const std::string requests_id);
+    static void handleSendMessage(session* sess, std::string accessToken, std::string receiverUID, int8_t contentType, const std::string content, const std::string tempmsgid, const std::string requests_id);
 
     static void handleRefreshToken(session* sess, std::string refreshToken, const std::string requests_id);
 
@@ -120,7 +120,7 @@ private:
 
     static void pushFriendAvatar(int64_t changeUID, const std::string& avatar);
 
-    static void pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, const std::string& content, int64_t convSeq);
+    static void pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, int8_t contentType, const std::string& content, int64_t convSeq);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);

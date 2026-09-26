@@ -1,5 +1,7 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall
+CXXFLAGS = -std=c++17 -Wall -Wno-deprecated-declarations
+
+MINIO_ROOT = /home/saltedfish/vcpkg/installed/x64-linux
 
 # 头文件搜索路径
 INCLUDES = -I. \
@@ -8,16 +10,22 @@ INCLUDES = -I. \
            -I./sql \
            -I./third_party \
 	   -I./thread \
-	   -I./logger
+	   -I./logger \
+	   -I$(MINIO_ROOT)/include
 
 # 链接库
-LIBS = -levent -lmysqlclient -lpthread -lsodium -lcrypto -levent_pthreads
+LDFLAGS = -L$(MINIO_ROOT)/lib
+
+# 链接库
+LIBS = -lminiocpp -lcurlpp -lINIReader -linih -lcurl \
+       -lpugixml -lssl -lcrypto -lz \
+       -levent -lmysqlclient -lpthread -lsodium -levent_pthreads \
+       -ldl
 
 # 输出目录和目标
 BUILD_DIR = build
 TARGET = $(BUILD_DIR)/ChatServer
 
-# 收集所有 .cpp 源文件
 SRCS = ChatServer.cpp \
        network/ChatServerListener.cpp \
        network/ChatServerWorker.cpp \
@@ -39,9 +47,8 @@ all: $(TARGET)
 # 链接
 $(TARGET): $(OBJS)
 	mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(OBJS) -o $@ $(LIBS)
+	$(CXX) $(CXXFLAGS) $(OBJS) -o $@ $(LDFLAGS) $(LIBS)
 
-# 编译每个 .cpp，保留子目录结构
 $(BUILD_DIR)/%.o: %.cpp
 	mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@

@@ -1,11 +1,20 @@
 #include "ChatServerUploadWorker.h"
-#include <cctype>
+#include "miniocpp/args.h"
+#include "miniocpp/client.h"
+#include "miniocpp/http.h"
+#include "miniocpp/providers.h"
+#include "miniocpp/request.h"
+#include <charconv>
 #include <cstring>
 #include <event2/buffer.h>
 #include <event2/event.h>
 #include <event2/http.h>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 Logger ChatServerUploadWorker::logger("UploadWorker");
 
@@ -61,6 +70,14 @@ void ChatServerUploadWorker::stop()
     this->is_run = false;
 }
 
+minio::s3::Client& ChatServerUploadWorker::getMinioClient()
+{
+    static minio::s3::BaseUrl baseUrl("http://192.168.153.128:9000");
+    static minio::creds::StaticProvider providers("saltedfish_test", "saltedfish_test");
+    static minio::s3::Client client(baseUrl, &providers);
+    return client;
+}
+
 void ChatServerUploadWorker::waiting()
 {
     if(this->base)
@@ -91,19 +108,22 @@ void ChatServerUploadWorker::cb_distribute(evhttp_request* req, void* arg)
 	url.pop_back();
     
     evhttp_cmd_type command = evhttp_request_get_command(req);
-    if(command == EVHTTP_REQ_POST && url == "/upload")
+    std::string path = url;
+    size_t ppos = path.find('?');
+    if(ppos != std::string::npos)
+	path = path.substr(0, ppos);
+
+    if(command == EVHTTP_REQ_POST && path == "/upload/init")
     {
-	cb_upload(req, nullptr);
+	cb_uploadInit(req, nullptr);
     }
-    else if(command == EVHTTP_REQ_GET && url.find("/upload/") != std::string::npos)
+    else if(command == EVHTTP_REQ_POST && path == "/upload/part")
     {
-	if(url.size() > 8)
-	    cb_download(req, nullptr);
-	else
-	{
-	    evhttp_send_reply(req, 404, nullptr, nullptr);
-	    return;
-	}
+	cb_uploadPart(req, nullptr);
+    }
+    else if(command == EVHTTP_REQ_POST && path == "/upload/complete")
+    {
+	cb_uploadComplete(req, nullptr);
     }
     else
     {
@@ -112,334 +132,505 @@ void ChatServerUploadWorker::cb_distribute(evhttp_request* req, void* arg)
     }
 }
 
-void ChatServerUploadWorker::cb_upload(evhttp_request* req, void* arg)
+bool ChatServerUploadWorker::isExists(const std::string& bucket, const std::string& key)
 {
-    //using multipart/form-data
+    minio::s3::StatObjectArgs args;
+    args.bucket = bucket;
+    args.object = key;
+    
+    auto resp = getMinioClient().StatObject(args);
+    return static_cast<bool>(resp);
+}
+
+std::string ChatServerUploadWorker::createUploadUrl(const std::string& bucket, const std::string& key)
+{
+    minio::s3::GetPresignedObjectUrlArgs args;
+    args.bucket = bucket;
+    args.object = key;
+    args.method = minio::http::Method::kPut;
+    args.expiry_seconds = 3600;
+
+    auto resp = getMinioClient().GetPresignedObjectUrl(args);
+    if(!resp)
+	return "";
+    return resp.url;
+}
+
+std::string ChatServerUploadWorker::createMultipartUpload(const std::string& bucket, const std::string& key, const std::string& mimeType)
+{
+    minio::s3::CreateMultipartUploadArgs args;
+    args.bucket = bucket;
+    args.object = key;
+    args.headers.Add("Content-Type", mimeType);
+
+    auto resp = getMinioClient().CreateMultipartUpload(args);
+    if(!resp)
+    {
+	logger.error("创建分页上传失败:" + resp.Error().String());
+	return "";
+    }
+    return resp.upload_id;
+}
+
+void ChatServerUploadWorker::abortMultipartUpload(const std::string& bucket, const std::string& key, const std::string& uploadId)
+{
+    minio::s3::AbortMultipartUploadArgs args;
+    args.bucket = bucket;
+    args.object = key;
+    args.upload_id = uploadId;
+
+    auto resp = getMinioClient().AbortMultipartUpload(args);
+    if(!resp)
+	logger.warn("终止分片上传失败:" + resp.Error().String());
+}
+
+bool ChatServerUploadWorker::uploadPart(const std::string& bucket, const std::string& key, const std::string& uploadId, int partNumber, const char* data, size_t size, std::string& outEtag)
+{
+    minio::s3::UploadPartArgs args;
+    args.bucket = bucket;
+    args.object = key;
+    args.upload_id = uploadId;
+    args.part_number = static_cast<unsigned int>(partNumber);
+    args.data = std::string_view(data, size);
+    args.buf = const_cast<char*>(data);
+    args.part_size = size;
+
+    auto resp = getMinioClient().UploadPart(args);
+    if(!resp)
+    {
+	logger.error("上传分片失败:" + resp.Error().String());
+	return false;
+    }
+    outEtag = resp.etag;
+    return true;
+}
+
+bool ChatServerUploadWorker::completeMultipartUpload(const std::string& bucket, const std::string& key, const std::string& uploadId, const std::vector<std::pair<int, std::string>>& parts)
+{
+    minio::s3::CompleteMultipartUploadArgs args;
+    args.bucket = bucket;
+    args.object = key;
+    args.upload_id = uploadId;
+
+    for(auto& [num, etag] : parts)
+	args.parts.emplace_back(static_cast<unsigned int>(num), etag);
+
+    auto resp = getMinioClient().CompleteMultipartUpload(args);
+    if(!resp)
+    {
+	logger.error("合并分页失败:" + resp.Error().String());
+	return false;
+    }
+    return true;
+}
+
+void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
+{
     auto input_header = evhttp_request_get_input_headers(req);
-    const char* auth = evhttp_find_header(input_header, "Authorization");
-    if(!auth)
+    if(!verifyAccessToken(input_header))
+    {
+        evhttp_send_reply(req, 401, nullptr, nullptr);
+	return;
+    }
+	
+    evbuffer* buf_input = evhttp_request_get_input_buffer(req);
+    size_t len_body = evbuffer_get_length(buf_input);
+    if(len_body == 0 || len_body > 4096)
     {
 	evhttp_send_reply(req, 400, nullptr, nullptr);
 	return;
     }
-    std::string authStr(auth);
-    std::string lowerAuth = authStr;
 
-    for(char& c : lowerAuth)
+    std::string body(len_body, '\0');
+    evbuffer_copyout(buf_input, &body[0], len_body);
+
+    json j = json::parse(body, nullptr, false);
+    if(j.is_discarded())
     {
+	logger.warn("parse Json Error");
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+    
+    if(!j.contains("Md5") || !j["Md5"].is_string() || !j.contains("Suffix") || !j["Suffix"].is_string() || !j.contains("Size") || !j["Size"].is_string())
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    std::string md5 = j.value("Md5", "");
+    std::string suffix = j.value("Suffix", "");
+    std::string sizeStr = j.value("Size", "");
+    int64_t size = 0; 
+    auto [ptr, ec] = std::from_chars(sizeStr.data(), sizeStr.data() + sizeStr.size(), size);
+    if(ec != std::errc() || ptr != sizeStr.data() + sizeStr.size())
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    for(char& c : suffix)
 	c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    size_t pos_tokenLine = lowerAuth.find("bearer ");
-    if(pos_tokenLine == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    std::string accessToken = authStr.substr(pos_tokenLine + 7);
-    accessToken.erase(accessToken.find_last_not_of(" \t\r\n") + 1);
-    int64_t uid = GlobalTools::verifyAccessToken(accessToken);
-    if(uid == -1)
-    {
-	evhttp_send_reply(req, 401, nullptr, nullptr);
-	return;
-    }
 
-    const char* ct = evhttp_find_header(input_header, "Content-Type");
-    if(!ct)
+    if(md5.size() != 32 || !std::all_of(md5.begin(), md5.end(), [](char c){
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }))
     {
 	evhttp_send_reply(req, 400, nullptr, nullptr);
 	return;
     }
 
-    std::string content_type(ct);
-    const std::string preKeyWord= "boundary=";
-    size_t pos = content_type.find(preKeyWord);
-    if(pos == std::string::npos)
+    std::string head;
+    std::string mimeType;
+    int64_t maxSize = 0;
+    if(suffix == "jpg" || suffix == "jpeg" || suffix == "png")
+    {
+	head = "images/";
+	maxSize = 10LL * 1024 * 1024;
+	mimeType = (suffix == "png") ? "image/png" : "image/jpeg";
+    }
+    else if(suffix == "mp4" || suffix == "mov" || suffix == "webm")
+    {
+	head = "videos/";
+	maxSize = 1024LL * 1024 * 1024;
+	if(suffix == "mp4")
+	    mimeType = "video/mp4";
+	else if(suffix == "mov")
+	    mimeType = "video/quicktime";
+	else
+	    mimeType = "video/webm";
+    }
+    else
     {
 	evhttp_send_reply(req, 400, nullptr, nullptr);
 	return;
     }
     
-    std::string raw_boundary = content_type.substr(pos + preKeyWord.size());
-    auto start = raw_boundary.find_first_not_of(" \t\"'");
-    auto end = raw_boundary.find_last_not_of(" \t\"'");
-    if(start == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    std::string boundary = "--" + raw_boundary.substr(start, end - start + 1);
-
-    evbuffer* buf_input = evhttp_request_get_input_buffer(req);
-    size_t len_body = evbuffer_get_length(buf_input);
-    if(len_body == 0)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    if(len_body > 2*1024*1024)
+    if(size <= 0 || size > maxSize)
     {
 	evhttp_send_reply(req, 413, nullptr, nullptr);
 	return;
     }
-    
-    //get body
-    std::string body(len_body, '\0');
-    evbuffer_copyout(buf_input, &body[0], len_body);
 
-    size_t pos_header = body.find(boundary);
-    if(pos_header == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
+    std::string key = head + md5 + "." + suffix;
+    std::string publicUrl = "http://192.168.153.128/chat/" + key;
 
-    //get data type
-    size_t pos_end_header = body.find("\r\n\r\n", pos_header + boundary.size());
-    if(pos_end_header == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
+    json resp;
+    resp["Url"] = publicUrl;
 
-    std::string original_header = body.substr(pos_header + boundary.size(), pos_end_header - (pos_header + boundary.size()));
-    std::string header = original_header;
-    for(char& c : header)
-	c = std::tolower(static_cast<unsigned char>(c));
-    size_t pos_cd = header.find("content-disposition:");
-    if(pos_cd == std::string::npos)
+    if(isExists("chat", key))
     {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
+	resp["Exists"] = true;
     }
-    size_t pos_end_cd = header.find("\r\n", pos_cd);
-    if(pos_end_cd == std::string::npos)
-	pos_end_cd = header.size();
+    else
+    {
+	const int64_t part_size = 5LL * 1024 * 1024;
+	const int64_t max_part_count = 10000;
+	const int64_t multipart_size = 100LL * 1024 * 1024;
+	
+	bool needMultipart = size > multipart_size;
 
-    pos_cd += 20;
-    while(pos_cd < header.size() && header[pos_cd] == ' ')
-	pos_cd++;
-    std::string cd = header.substr(pos_cd, pos_end_cd - pos_cd);
+	if(!needMultipart)
+	{
+	    std::string uploadUrl = createUploadUrl("chat", key);
+	    if(uploadUrl.empty())
+	    {
+		evhttp_send_reply(req, 500, nullptr, nullptr);
+		return;
+	   }
+	    resp["Exists"] = false;
+	    resp["UploadUrl"] = uploadUrl;
+	}
+	else 
+	{
+	    std::string uploadId = createMultipartUpload("chat", key, mimeType);
+	    if(uploadId.empty())
+	    {
+		evhttp_send_reply(req, 500, nullptr, nullptr);
+		return;
+	    }
 
-    size_t pos_formData = cd.find("form-data");
-    if(pos_formData == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    pos_formData += 9; 
+	    int64_t partCount = (size + part_size - 1) / part_size;
+	    if(partCount > max_part_count)
+	    {
+		abortMultipartUpload("chat", key, uploadId);
+		evhttp_send_reply(req, 413, nullptr, nullptr);
+		return;
+	    }
 
-    std::string requestName;
-    std::string filename;
-    std::string file_type;
-    size_t pos_requestName = cd.find("name=\"", pos_formData);
-    if(pos_requestName == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    pos_requestName += 6;
-    size_t pos_end_requestName = cd.find("\"", pos_requestName);
-    if(pos_end_requestName == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    requestName = cd.substr(pos_requestName,pos_end_requestName - pos_requestName);
-    if(requestName != "file")
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
+	    resp["Exists"] = false;
+	    resp["ObjectKey"] = key;
+	    resp["UploadId"] = uploadId;
+	    resp["PartSize"] = std::to_string(part_size);
+	}
     }
 
-    size_t pos_fileName = cd.find("filename=\"", pos_formData);
-    if(pos_fileName == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    pos_fileName += 10;
-    size_t pos_end_fileName = cd.find("\"",pos_fileName);
-    if(pos_end_fileName == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    filename = cd.substr(pos_fileName,pos_end_fileName - pos_fileName);
-    if(filename.empty())
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-
-
-    size_t pos_fileType = header.find("content-type:");
-    if(pos_fileType == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    pos_fileType += 13;
-    size_t pos_end_fileType = header.find("\r\n",pos_fileType);
-    if(pos_end_fileType == std::string::npos)
-	pos_end_fileType = header.size();
-    while(pos_fileType < header.size() && header[pos_fileType] == ' ')
-	pos_fileType++;
-
-    file_type = header.substr(pos_fileType,pos_end_fileType - pos_fileType);
-    if(file_type != "image/jpeg" && file_type != "image/png")
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    
-    //get file data
-    pos_end_header += 4;
-
-    size_t pos_end = body.find(boundary, pos_end_header);
-    if(pos_end == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    
-    if(pos_end < 2 || body[pos_end - 2] != '\r' || body[pos_end - 1] != '\n')
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    pos_end -= 2;
-    size_t len_data = pos_end - pos_end_header;
-    const char* binary_data = &body[pos_end_header];
-    bool is_jpeg = false;
-    bool is_png = false;
-    std::string suffix;
-    if(len_data >= 3)
-	is_jpeg = isJpeg(binary_data);
-    if(len_data >= 8)
-	is_png = isPng(binary_data);
-    if(!is_jpeg && !is_png)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    if(is_jpeg)
-	suffix = ".jpg";
-    else if(is_png)
-	suffix = ".png";
-    std::string filepath = "upload/" + std::to_string(sfGen.nextid()) + suffix;
-    try
-    {
-	std::filesystem::create_directories(std::filesystem::path(filepath).parent_path());
-    }catch(const std::filesystem::filesystem_error& e)
-    {
-	logger.warn(std::string("Create Upload DIR Error:") + e.what());
-	evhttp_send_reply(req, 500, nullptr, nullptr);
-	return;
-    }
-    std::ofstream ofs(filepath, std::ios::binary);
-    if(!ofs.is_open())
-    {
-	logger.warn("Open Avatar File Error");
-	evhttp_send_reply(req, 500, nullptr, nullptr);
-	return;
-    }
-    ofs.write(binary_data, len_data);
-    ofs.close();
-
-    //give back url
+    std::string respStr = resp.dump();
     evbuffer* out = evbuffer_new();
-    evbuffer_add_printf(out, "{\"Url\":\"http://192.168.153.128:9001/%s\"}",filepath.c_str());
+    evbuffer_add(out, respStr.c_str(), respStr.size());
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
     evhttp_send_reply(req, 200, nullptr, out);
 }
 
-bool ChatServerUploadWorker::isJpeg(const char* binary_data)
-{
-    return static_cast<unsigned char>(binary_data[0]) == 0xFF &&
-	static_cast<unsigned char>(binary_data[1]) == 0xD8 &&
-	static_cast<unsigned char>(binary_data[2]) == 0xFF;
-}
-
-bool ChatServerUploadWorker::isPng(const char* binary_data)
-{
-    return static_cast<unsigned char>(binary_data[0]) == 0x89 &&
-	static_cast<unsigned char>(binary_data[1]) == 0x50 &&
-	static_cast<unsigned char>(binary_data[2]) == 0x4E &&
-	static_cast<unsigned char>(binary_data[3]) == 0x47 &&
-	static_cast<unsigned char>(binary_data[4]) == 0x0D &&
-	static_cast<unsigned char>(binary_data[5]) == 0x0A &&
-	static_cast<unsigned char>(binary_data[6]) == 0x1A &&
-	static_cast<unsigned char>(binary_data[7]) == 0x0A;
-}
-
-void ChatServerUploadWorker::cb_download(evhttp_request* req, void* arg)
+void ChatServerUploadWorker::cb_uploadPart(evhttp_request* req, void* arg)
 {
     auto input_header = evhttp_request_get_input_headers(req);
-    const char* auth = evhttp_find_header(input_header, "Authorization");
-    if(!auth)
+    if(!verifyAccessToken(input_header))
     {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    std::string authStr(auth);
-    std::string lowerAuth = authStr;
-
-    for(char& c : lowerAuth)
-    {
-	c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    size_t pos_tokenLine = lowerAuth.find("bearer ");
-    if(pos_tokenLine == std::string::npos)
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
-    std::string accessToken = authStr.substr(pos_tokenLine + 7);
-    accessToken.erase(accessToken.find_last_not_of(" \t\r\n") + 1);
-    int64_t uid = GlobalTools::verifyAccessToken(accessToken);
-    if(uid == -1)
-    {
-	evhttp_send_reply(req, 401, nullptr, nullptr);
+        evhttp_send_reply(req, 401, nullptr, nullptr);
 	return;
     }
 
     const char* uri = evhttp_request_get_uri(req);
-
-    std::string filepath = "." + std::string(uri);
-    if(filepath.find("..") != std::string::npos)
+    if(!uri)
     {
-	evhttp_send_reply(req, 403, nullptr, nullptr);
-	return;
-    }
-    std::ifstream ifs(filepath, std::ios::binary);
-    if(!ifs.is_open())
-    {
-	evhttp_send_reply(req, 404, nullptr, nullptr);
+        evhttp_send_reply(req, 400, nullptr, nullptr);
 	return;
     }
 
-    evbuffer* data = evbuffer_new();
-    char buf[4096];
-    while(ifs.read(buf, sizeof(buf)).gcount() > 0)
-	evbuffer_add(data, buf, ifs.gcount());
-    ifs.close();
+    std::string url(uri);
+    std::string key = getUrlQueryParam(url, "ObjectKey");
+    std::string uploadId = getUrlQueryParam(url, "UploadId");
+    std::string partNumStr = getUrlQueryParam(url, "partNumber");
+
+    if(key.empty() || uploadId.empty() || partNumStr.empty())
+    {
+        evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    int64_t partNumber = 0;
+    auto [ptr, ec] = std::from_chars(partNumStr.data(), partNumStr.data() + partNumStr.size(), partNumber);
+    if(ec != std::errc() || ptr != partNumStr.data() + partNumStr.size())
+    {
+        evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    if(key.find("..") != std::string::npos || (!startsWith(key, "images/") && !startsWith(key, "videos/")))
+    {
+        evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
     
-    std::string ct = "application/octet-stream";
-
-    size_t pos_point = filepath.rfind(".");
-    if(pos_point != std::string::npos)
+    evbuffer* buf_input = evhttp_request_get_input_buffer(req);
+    size_t len_body = evbuffer_get_length(buf_input);
+    if(len_body == 0 || len_body > 6 * 1024 * 1024)
     {
-	if(filepath.substr(pos_point) == ".png")
-	    ct = "image/png";
-	else if(filepath.substr(pos_point) == ".jpeg" ||
-		filepath.substr(pos_point) == ".jpg")
-	    ct = "image/jpeg";
+        evhttp_send_reply(req, 413, nullptr, nullptr);
+	return;
     }
-    evkeyvalq* header = evhttp_request_get_output_headers(req);
-    evhttp_add_header(header, "Content-Type", ct.c_str());
-    evhttp_add_header(header, "Cache-Control", "public, max-age=86400");
-    evhttp_add_header(header, "Content-Length", std::to_string(evbuffer_get_length(data)).c_str());
 
-    evhttp_send_reply(req, 200, nullptr, data);
+    std::string body(len_body, '\0');
+    evbuffer_copyout(buf_input, &body[0], len_body);
+
+    std::string etag;
+    if(!uploadPart("chat", key, uploadId, static_cast<int>(partNumber), body.data(), body.size(), etag))
+    {
+        evhttp_send_reply(req, 500, nullptr, nullptr);
+	return;
+    }
+
+    json resp;
+    resp["ETag"] = etag;
+    std::string respStr = resp.dump();
+
+    evbuffer* out = evbuffer_new();
+    evbuffer_add(out, respStr.c_str(), respStr.size());
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
+    evhttp_send_reply(req, 200, nullptr, out);
+}
+
+void ChatServerUploadWorker::cb_uploadComplete(evhttp_request* req, void* arg)
+{
+    auto input_header = evhttp_request_get_input_headers(req);
+    if(!verifyAccessToken(input_header))
+    {
+        evhttp_send_reply(req, 401, nullptr, nullptr);
+	return;
+    }
+
+    evbuffer* buf_input = evhttp_request_get_input_buffer(req);
+    size_t len_body = evbuffer_get_length(buf_input);
+    if(len_body == 0 || len_body > 1024 * 1024)
+    {
+        evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    std::string body(len_body, '\0');
+    evbuffer_copyout(buf_input, &body[0], len_body);
+
+    json j = json::parse(body, nullptr, false);
+    if(j.is_discarded())
+    {
+        evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    if(!j.contains("ObjectKey") || !j["ObjectKey"].is_string() || 
+	!j.contains("UploadId") || !j["UploadId"].is_string() || 
+	!j.contains("Parts") || !j["Parts"].is_array())
+    {
+        evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    std::string key = j.value("ObjectKey", "");
+    std::string uploadId = j.value("UploadId", "");
+
+    if(key.find("..") != std::string::npos || (!startsWith(key, "images/") && !startsWith(key, "videos/")))
+    {
+        evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    std::vector<std::pair<int, std::string>> parts;
+    for(auto& p : j["Parts"])
+    {
+	if(!p.is_object())
+	{
+	    evhttp_send_reply(req, 400, nullptr, nullptr);
+	    return;
+	}
+	if(!p.contains("PartNumber") || !p["PartNumber"].is_string() || 
+	    !p.contains("ETag") || !p["ETag"].is_string())
+	{
+	    evhttp_send_reply(req, 400, nullptr, nullptr);
+	    return;
+	}
+
+	std::string partNumStr = p.value("PartNumber", "");
+	std::string etag = p.value("ETag", "");
+
+	int64_t partNumber = 0;
+	auto [ptr, ec] = std::from_chars(partNumStr.data(), partNumStr.data() + partNumStr.size(), partNumber);
+	if(ec != std::errc() || ptr != partNumStr.data() + partNumStr.size())
+	{
+	    evhttp_send_reply(req, 400, nullptr, nullptr);
+	    return;
+	}
+	
+	if(partNumber <= 0 || partNumber > 10000 || etag.empty())
+	{
+	    evhttp_send_reply(req, 400, nullptr, nullptr);
+	    return;
+	}
+	parts.emplace_back(static_cast<int>(partNumber), etag);
+    }
+
+    if(parts.empty() || parts.size() > 10000)
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    if(!completeMultipartUpload("chat", key, uploadId, parts))
+    {
+	evhttp_send_reply(req, 500, nullptr, nullptr);
+	return;
+    }
+
+    int64_t maxSize = 0;
+    if(startsWith(key, "images/"))
+	maxSize = 10LL * 1024 * 1024;
+    else if(startsWith(key, "videos/"))
+	maxSize = 1024LL * 1024 * 1024;
+    else
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    int64_t actualSize = 0;
+    if(!getObjectSize("chat", key, actualSize) || actualSize > maxSize)
+    {
+	removeObject("chat", key);
+	logger.warn("合并的文件大小超过最大值，执行删除:" + key);
+	evhttp_send_reply(req, 413, nullptr, nullptr);
+	return;
+    }
+
+    json resp;
+    resp["Url"] = "http://192.168.153.128/chat/" + key;
+    std::string respStr = resp.dump();
+
+    evbuffer* out = evbuffer_new();
+    evbuffer_add(out, respStr.data(), respStr.size());
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
+    evhttp_send_reply(req, 200, nullptr, out);
+}
+
+bool ChatServerUploadWorker::verifyAccessToken(const evkeyvalq* evq)
+{
+    const char* auth = evhttp_find_header(evq, "Authorization");
+    if(!auth)
+        return false;
+
+    std::string authStr(auth);
+    std::string lowerAuth = authStr;
+
+    for(char& c : lowerAuth)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    size_t pos_tokenLine = lowerAuth.find("bearer ");
+    if(pos_tokenLine == std::string::npos)
+        return false;
+
+    std::string accessToken = authStr.substr(pos_tokenLine + 7);
+    accessToken.erase(accessToken.find_last_not_of(" \t\r\n") + 1);
+    int64_t uid = GlobalTools::verifyAccessToken(accessToken);
+    if(uid == -1)
+        return false;
+    return true;
+}
+
+std::string ChatServerUploadWorker::getUrlQueryParam(const std::string& url, const std::string& name)
+{
+    std::string key = "?" + name + "=";
+    size_t pos = url.find(key);
+    if(pos == std::string::npos)
+    {
+	key = "&" + name + "=";
+	pos = url.find(key);
+	if(pos == std::string::npos)
+	    return "";
+	pos += key.size();
+    }
+    else
+	pos += key.size();
+    size_t end = url.find('&', pos);
+    if(end == std::string::npos)
+	end = url.size();
+    return url.substr(pos, end - pos);
+}
+
+bool ChatServerUploadWorker::getObjectSize(const std::string& bucket, const std::string& key, int64_t& outSize)
+{
+    minio::s3::StatObjectArgs args;
+    args.bucket = bucket;
+    args.object = key;
+
+    auto resp = getMinioClient().StatObject(args);
+    if(!resp)
+    {
+	logger.error("获取Object大小失败:" + resp.Error().String());
+	return false;
+    }
+    outSize = static_cast<int64_t>(resp.size);
+    return true;
+}
+
+bool ChatServerUploadWorker::removeObject(const std::string& bucket, const std::string& key)
+{
+    minio::s3::RemoveObjectArgs args;
+    args.bucket = bucket;
+    args.object = key;
+
+    auto resp = getMinioClient().RemoveObject(args);
+    return static_cast<bool>(resp);
+}
+
+bool ChatServerUploadWorker::startsWith(const std::string& s, const std::string& prefix)
+{
+    return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }

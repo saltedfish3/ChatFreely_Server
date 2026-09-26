@@ -362,12 +362,12 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	    logger.warn("Json No AccessToken");
 	    return;
 	}
-	if(!j.contains("ReceiverUID") || !j["ReceiverUID"].is_string() || !j.contains("Content") || !j["Content"].is_string() || !j.contains("TempMsgID") || !j["TempMsgID"].is_string())
+	if(!j.contains("ReceiverUID") || !j["ReceiverUID"].is_string() || !j.contains("Content") || !j["Content"].is_string() || !j.contains("TempMsgID") || !j["TempMsgID"].is_string() || !j.contains("ContentType") || !j["ContentType"].is_number())
 	{
 	    logger.warn("Json No Param");
 	    return;
 	}
-	handleSendMessage(sess, j.value("AccessToken", ""), j.value("ReceiverUID", ""), j.value("Content", ""), j.value("TempMsgID", ""), requests_id.str());
+	handleSendMessage(sess, j.value("AccessToken", ""), j.value("ReceiverUID", ""), j.value<int8_t>("ContentType", 0),j.value("Content", ""), j.value("TempMsgID", ""), requests_id.str());
     }
     else if(type == "GetConversationsFriendUIDListAndSeq")
     {
@@ -1995,7 +1995,7 @@ void ChatServerWorker::pushFriendAvatar(int64_t changeUID, const std::string& av
     });
 }
 
-void ChatServerWorker::pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, const std::string& content, int64_t convSeq)
+void ChatServerWorker::pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, int8_t contentType, const std::string& content, int64_t convSeq)
 {
     std::shared_ptr<session> pushSessPtr;
     {
@@ -2007,12 +2007,13 @@ void ChatServerWorker::pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t 
     }
     if(pushSessPtr)
     {
-	auto* func = new std::function<void()>([sendUID, messageID, timestamp, content, pushSessPtr, convSeq](){
+	auto* func = new std::function<void()>([sendUID, messageID, timestamp, content, pushSessPtr, convSeq, contentType](){
 	    json j;
 	    j["Requests_id"] = "125433704";
 	    j["Type"] = "PushNewMessage";
 	    j["SenderUID"] = std::to_string(sendUID);
 	    j["MessageID"] = std::to_string(messageID);
+	    j["ContentType"] = std::to_string(contentType);
 	    j["Content"] = content;
 	    j["TimeStamp"] = std::to_string(timestamp);
 	    j["ConvSeq"] = std::to_string(convSeq);
@@ -2030,10 +2031,10 @@ void ChatServerWorker::pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t 
     }
 }
 
-void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken, std::string receiverUID, const std::string content, const std::string tempmsgid, const std::string requests_id)
+void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken, std::string receiverUID, int8_t contentType, const std::string content, const std::string tempmsgid, const std::string requests_id)
 {
     auto sessPtr = sess->shared_from_this();
-    ThreadPool::getThreadPool()->addTask([accessToken, receiverUID, content, requests_id, sessPtr, tempmsgid](){
+    ThreadPool::getThreadPool()->addTask([accessToken, receiverUID, content, requests_id, sessPtr, tempmsgid, contentType](){
 	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
 	bool result = false;
 	int64_t timestamp = 0;
@@ -2042,7 +2043,7 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 	int64_t id = sfGen.nextid();
 	int64_t nextSeq = 0;
 
-	std::string idempotentKey = requests_id + "_" + tempmsgid;
+	std::string idempotentKey = receiverUID + "_" + tempmsgid;
 	json j_Cache;
 	bool isCache = sessPtr->myself->tryGetCache(idempotentKey, j_Cache);
 
@@ -2127,12 +2128,14 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 				if(con->executeSql(sql_insertConversations_myself, bind_param_insertConversations_myself) && con->getAffectRows() > 0 && con->executeSql(sql_insertConversations_friend, bind_param_insertConversations_friend) && con->getAffectRows() > 0)
 				{
 				    nextSeq = conv_seq;
-				    std::string sql2 = "INSERT INTO messages(snowid, conversation_id, conv_seq, sender_id, content, idempotent_key, timestamp) VALUES(?, ?, ?, ?, ?, ?, ?);";
-				    MYSQL_BIND bind_param2[7];
+				    std::string sql2 = "INSERT INTO messages(snowid, conversation_id, conv_seq, sender_id, type, content, idempotent_key, timestamp) VALUES(?, ?, ?, ?, ?, ?, ?, ?);";
+				    MYSQL_BIND bind_param2[8];
 				    initLongLongParam(&bind_param2[0], &id, sizeof(id));
 				    initLongLongParam(&bind_param2[1], &conversationID, sizeof(conversationID));
 				    initLongLongParam(&bind_param2[2], &nextSeq, sizeof(nextSeq));
 				    initLongLongParam(&bind_param2[3], &senderUID, sizeof(senderUID));
+				    int8_t contentType_ = contentType;
+				    initTinyIntParam(&bind_param2[4], &contentType_, sizeof(contentType_));
 
 				    std::string truncContent;
 				    if(content.size() > 10000)
@@ -2140,18 +2143,18 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 				    else
 					truncContent = content;
 				    unsigned long len_message = truncContent.size();
-				    initStringParam(&bind_param2[4], (char*)truncContent.data(), truncContent.size(), &len_message);
+				    initStringParam(&bind_param2[5], (char*)truncContent.data(), truncContent.size(), &len_message);
 				    unsigned long len_idempotent = idempotentKey.size();
-				    initStringParam(&bind_param2[5], (char*)idempotentKey.data(), idempotentKey.size(), &len_idempotent);
+				    initStringParam(&bind_param2[6], (char*)idempotentKey.data(), idempotentKey.size(), &len_idempotent);
 				    timestamp = ((id >> 22) + 1704067200000LL) / 1000; 
-				    initLongLongParam(&bind_param2[6], &timestamp, sizeof(timestamp));
+				    initLongLongParam(&bind_param2[7], &timestamp, sizeof(timestamp));
 
 				    con->executeSql(sql2, bind_param2);
 				    if(con->getAffectRows() > 0)
 				    {
 					sqlTrans.commit();
 					result = true;
-					pushNewMessage(senderUID, friendUID, id, timestamp, truncContent, nextSeq);
+					pushNewMessage(senderUID, friendUID, id, timestamp, contentType, truncContent, nextSeq);
 				    }
 				    else
 				    {
@@ -2312,7 +2315,7 @@ void ChatServerWorker::handleSyncMessages(session* sess, std::string accessToken
 	    int64_t friendUID_int = std::stoll(friendUID);
 	    int64_t uid = sessPtr->uid.value();
 	    int64_t conversationID = 0;
-	    std::string sql = "SELECT snowid, conv_seq, sender_id, content, timestamp FROM messages WHERE conversation_id = ? AND conv_seq > ? ORDER BY conv_seq ASC LIMIT ?;";
+	    std::string sql = "SELECT snowid, conv_seq, sender_id, type, content, timestamp FROM messages WHERE conversation_id = ? AND conv_seq > ? ORDER BY conv_seq ASC LIMIT ?;";
 	    
 	    MYSQL_BIND bind_selectFriendUID[4];
 	    initLongLongParam(&bind_selectFriendUID[0], &friendUID_int, sizeof(friendUID_int));
@@ -2333,18 +2336,20 @@ void ChatServerWorker::handleSyncMessages(session* sess, std::string accessToken
 		initLongLongParam(&bind_selectMessage[1], &startConvSeq_copy, sizeof(startConvSeq_copy));
 		initIntParam(&bind_selectMessage[2], &limit_copy, sizeof(limit_copy));
 	    
-		MYSQL_BIND result_selectMessage[5];
+		MYSQL_BIND result_selectMessage[6];
 		int64_t result_messageID = 0;
 		int64_t result_convSeq = 0;
 		int64_t result_senderID = 0;
+		int8_t type = 0;
 		char result_buf_content[10000 * 4 + 1];
 		unsigned long len_content = 0;
 		int64_t result_timestamp = 0;
 		initLongLongParam(&result_selectMessage[0], &result_messageID, sizeof(result_messageID));
 		initLongLongParam(&result_selectMessage[1], &result_convSeq, sizeof(result_convSeq));
 		initLongLongParam(&result_selectMessage[2], &result_senderID, sizeof(result_senderID));
-		initStringParam(&result_selectMessage[3], result_buf_content, sizeof(result_buf_content), &len_content);
-		initLongLongParam(&result_selectMessage[4], &result_timestamp, sizeof(result_timestamp));
+		initTinyIntParam(&result_selectMessage[3], &(type), sizeof(type));
+		initStringParam(&result_selectMessage[4], result_buf_content, sizeof(result_buf_content), &len_content);
+		initLongLongParam(&result_selectMessage[5], &result_timestamp, sizeof(result_timestamp));
 
 		if(con->executeSql(sql, bind_selectMessage, result_selectMessage))
 		{
@@ -2358,6 +2363,7 @@ void ChatServerWorker::handleSyncMessages(session* sess, std::string accessToken
 			item["MessageID"] = std::to_string(result_messageID);
 			item["ConvSeq"] = std::to_string(result_convSeq);
 			item["SenderUID"] = std::to_string(result_senderID);
+			item["ContentType"] = std::to_string(type);
 			item["Content"] = content;
 			item["Timestamp"] = std::to_string(result_timestamp);
 			arr.push_back(item);

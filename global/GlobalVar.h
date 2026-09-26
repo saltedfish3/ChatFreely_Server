@@ -17,8 +17,8 @@
 #include "../third_party/snowflake.hpp"
 #include "../third_party/json.hpp"
 
-#define SPort 9000
-#define UploadPort 9001
+#define SPort 9002
+#define UploadPort 9003
 #define AppName "ChatFreely"
 #define MAX_CACHE_SIZE 10000
 

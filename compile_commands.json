@@ -1,0 +1,90 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-std=c++17",
+      "-Wall",
+      "-I.",
+      "-I./global",
+      "-I./network",
+      "-I./sql",
+      "-I./third_party",
+      "-I./thread",
+      "-I./logger",
+      "-I/home/saltedfish/vcpkg/installed/x64-linux/include",
+      "-c",
+      "-o",
+      "build/ChatServer.o",
+      "ChatServer.cpp"
+    ],
+    "directory": "/home/saltedfish/Desktop/ChatServer",
+    "file": "/home/saltedfish/Desktop/ChatServer/ChatServer.cpp",
+    "output": "/home/saltedfish/Desktop/ChatServer/build/ChatServer.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-std=c++17",
+      "-Wall",
+      "-I.",
+      "-I./global",
+      "-I./network",
+      "-I./sql",
+      "-I./third_party",
+      "-I./thread",
+      "-I./logger",
+      "-I/home/saltedfish/vcpkg/installed/x64-linux/include",
+      "-c",
+      "-o",
+      "build/network/ChatServerListener.o",
+      "network/ChatServerListener.cpp"
+    ],
+    "directory": "/home/saltedfish/Desktop/ChatServer",
+    "file": "/home/saltedfish/Desktop/ChatServer/network/ChatServerListener.cpp",
+    "output": "/home/saltedfish/Desktop/ChatServer/build/network/ChatServerListener.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-std=c++17",
+      "-Wall",
+      "-I.",
+      "-I./global",
+      "-I./network",
+      "-I./sql",
+      "-I./third_party",
+      "-I./thread",
+      "-I./logger",
+      "-I/home/saltedfish/vcpkg/installed/x64-linux/include",
+      "-c",
+      "-o",
+      "build/network/ChatServerWorker.o",
+      "network/ChatServerWorker.cpp"
+    ],
+    "directory": "/home/saltedfish/Desktop/ChatServer",
+    "file": "/home/saltedfish/Desktop/ChatServer/network/ChatServerWorker.cpp",
+    "output": "/home/saltedfish/Desktop/ChatServer/build/network/ChatServerWorker.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-std=c++17",
+      "-Wall",
+      "-I.",
+      "-I./global",
+      "-I./network",
+      "-I./sql",
+      "-I./third_party",
+      "-I./thread",
+      "-I./logger",
+      "-I/home/saltedfish/vcpkg/installed/x64-linux/include",
+      "-c",
+      "-o",
+      "build/network/ChatServerUploadWorker.o",
+      "network/ChatServerUploadWorker.cpp"
+    ],
+    "directory": "/home/saltedfish/Desktop/ChatServer",
+    "file": "/home/saltedfish/Desktop/ChatServer/network/ChatServerUploadWorker.cpp",
+    "output": "/home/saltedfish/Desktop/ChatServer/build/network/ChatServerUploadWorker.o"
+  }
+]
