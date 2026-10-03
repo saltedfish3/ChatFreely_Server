@@ -1,9 +1,23 @@
 #include "ChatServerUploadWorker.h"
+#include <cctype>
+#include <cstdlib>
+#include <sstream>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize2.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #include "miniocpp/args.h"
 #include "miniocpp/client.h"
 #include "miniocpp/http.h"
 #include "miniocpp/providers.h"
 #include "miniocpp/request.h"
+#include <algorithm>
 #include <charconv>
 #include <cstring>
 #include <event2/buffer.h>
@@ -124,6 +138,10 @@ void ChatServerUploadWorker::cb_distribute(evhttp_request* req, void* arg)
     else if(command == EVHTTP_REQ_POST && path == "/upload/complete")
     {
 	cb_uploadComplete(req, nullptr);
+    }
+    else if(command == EVHTTP_REQ_PUT && path == "/upload/single")
+    {
+	cb_uploadSingle(req, nullptr);
     }
     else
     {
@@ -302,8 +320,20 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
     }
     else
     {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
+	if(!suffix.empty())
+	{
+	    if(suffix.size() > 16 || !std::all_of(suffix.begin(), suffix.end(), [](char c){
+		return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+	    }))
+	    {
+		evhttp_send_reply(req, 400, nullptr, nullptr);
+		return;
+	    }
+	}
+
+	head = "files/";
+	maxSize = 2LL * 1024 * 1024 * 1024;
+	mimeType = "application/octet-stream";
     }
     
     if(size <= 0 || size > maxSize)
@@ -312,15 +342,29 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 	return;
     }
 
-    std::string key = head + md5 + "." + suffix;
+    std::string key = suffix.empty() ? head + md5 : head + md5 + "." + suffix;
     std::string publicUrl = "http://192.168.153.128/chat/" + key;
 
     json resp;
     resp["Url"] = publicUrl;
 
+    bool skipThumb = j.value("SkipThumbnail", "0") == "1";
+
     if(isExists("chat", key))
     {
 	resp["Exists"] = true;
+
+	if(!skipThumb && startsWith(key, "images/"))
+	{
+	    size_t dotPos = key.find_last_of('.');
+	    if(dotPos != std::string::npos)
+	    {
+		std::string suffix = key.substr(dotPos + 1);
+		std::string thumbKey = key.substr(0, dotPos) + "thumbnail." + suffix;
+		if(isExists("chat", thumbKey))
+		    resp["ThumbnailUrl"] = "http://192.168.153.128/chat/" + thumbKey;
+	    }
+	}
     }
     else
     {
@@ -332,14 +376,26 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 
 	if(!needMultipart)
 	{
-	    std::string uploadUrl = createUploadUrl("chat", key);
-	    if(uploadUrl.empty())
-	    {
-		evhttp_send_reply(req, 500, nullptr, nullptr);
-		return;
-	   }
 	    resp["Exists"] = false;
-	    resp["UploadUrl"] = uploadUrl;
+	    if(startsWith(key, "images/"))
+	    {
+		const char* hostHeader = evhttp_find_header(input_header, "Host");
+		std::string host = hostHeader ? hostHeader : "192.168.153.128:9003";
+		std::string singleUrl = "http://" + host + "/upload/single?ObjectKey=" + key;
+		if(skipThumb)
+		    singleUrl += "&skipThumbnail=1";
+		resp["UploadUrl"] = singleUrl;
+	    }
+	    else
+	    {
+		std::string uploadUrl = createUploadUrl("chat", key);
+		if(uploadUrl.empty())
+		{
+		    evhttp_send_reply(req, 500, nullptr, nullptr);
+		    return;
+		}
+		resp["UploadUrl"] = uploadUrl;
+	    }
 	}
 	else 
 	{
@@ -407,7 +463,7 @@ void ChatServerUploadWorker::cb_uploadPart(evhttp_request* req, void* arg)
 	return;
     }
 
-    if(key.find("..") != std::string::npos || (!startsWith(key, "images/") && !startsWith(key, "videos/")))
+    if(key.find("..") != std::string::npos || (!startsWith(key, "images/") && !startsWith(key, "videos/") && !startsWith(key, "files/")))
     {
         evhttp_send_reply(req, 400, nullptr, nullptr);
 	return;
@@ -479,7 +535,7 @@ void ChatServerUploadWorker::cb_uploadComplete(evhttp_request* req, void* arg)
     std::string key = j.value("ObjectKey", "");
     std::string uploadId = j.value("UploadId", "");
 
-    if(key.find("..") != std::string::npos || (!startsWith(key, "images/") && !startsWith(key, "videos/")))
+    if(key.find("..") != std::string::npos || (!startsWith(key, "images/") && !startsWith(key, "videos/") && !startsWith(key, "files/")))
     {
         evhttp_send_reply(req, 400, nullptr, nullptr);
 	return;
@@ -536,6 +592,8 @@ void ChatServerUploadWorker::cb_uploadComplete(evhttp_request* req, void* arg)
 	maxSize = 10LL * 1024 * 1024;
     else if(startsWith(key, "videos/"))
 	maxSize = 1024LL * 1024 * 1024;
+    else if(startsWith(key, "files/"))
+	maxSize = 2LL * 1024 * 1024 * 1024;
     else
     {
 	evhttp_send_reply(req, 400, nullptr, nullptr);
@@ -555,6 +613,106 @@ void ChatServerUploadWorker::cb_uploadComplete(evhttp_request* req, void* arg)
     resp["Url"] = "http://192.168.153.128/chat/" + key;
     std::string respStr = resp.dump();
 
+    evbuffer* out = evbuffer_new();
+    evbuffer_add(out, respStr.data(), respStr.size());
+    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
+    evhttp_send_reply(req, 200, nullptr, out);
+}
+
+void ChatServerUploadWorker::cb_uploadSingle(evhttp_request* req, void* arg)
+{
+    auto input_header = evhttp_request_get_input_headers(req);
+    if(!verifyAccessToken(input_header))
+    {
+	evhttp_send_reply(req, 401, nullptr, nullptr);
+	return;
+    }
+
+    const char* uri = evhttp_request_get_uri(req);
+    if(!uri)
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    std::string uriStr(uri);
+    std::string objectKey = getUrlQueryParam(uriStr, "ObjectKey");
+
+    const std::string prefix = "images/";
+    if(!startsWith(objectKey, prefix))
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    std::string rest = objectKey.substr(prefix.size());
+    if(rest.find("..") != std::string::npos || rest.find('/') != std::string::npos)
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    size_t dotPos = rest.find_last_of('.');
+    if(dotPos == std::string::npos)
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    std::string md5Part = rest.substr(0, dotPos);
+    std::string suffix = rest.substr(dotPos + 1);
+    if(md5Part.size() != 32 || !std::all_of(md5Part.begin(), md5Part.end(), [](char c){
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }))
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    for(char& c : suffix)
+	c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    if(suffix != "jpg" && suffix != "jpeg" && suffix != "png")
+    {
+	evhttp_send_reply(req, 400, nullptr, nullptr);
+	return;
+    }
+
+    evbuffer* buf_input = evhttp_request_get_input_buffer(req);
+    size_t len_body = evbuffer_get_length(buf_input);
+    if(len_body == 0 || len_body > 10 * 1024 * 1024)
+    {
+	evhttp_send_reply(req, 413, nullptr, nullptr);
+	return;
+    }
+
+    std::string body(len_body, '\0');
+    evbuffer_copyout(buf_input, &body[0], len_body);
+
+    const char* ct = evhttp_find_header(input_header, "Content-Type");
+    std::string mimeType = ct ? std::string(ct) : "application/octet-stream";
+
+    if(!putObject("chat", objectKey, body, mimeType))
+    {
+	evhttp_send_reply(req, 500, nullptr, nullptr);
+	return;
+    }
+
+    std::string skipThumb = getUrlQueryParam(std::string(uri), "skipThumbnail");
+    bool needThumb = skipThumb != "1";
+
+    std::string publicUrl = "http://192.168.153.128/chat/" + objectKey;
+    std::string thumbUrl;
+
+    if(needThumb)
+	generateThumbnailFromData("chat", objectKey, body, thumbUrl);
+
+    json resp;
+    resp["Url"] = publicUrl;
+    if(!thumbUrl.empty())
+	resp["ThumbnailUrl"] = thumbUrl;
+
+    std::string respStr = resp.dump();
     evbuffer* out = evbuffer_new();
     evbuffer_add(out, respStr.data(), respStr.size());
     evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
@@ -630,7 +788,161 @@ bool ChatServerUploadWorker::removeObject(const std::string& bucket, const std::
     return static_cast<bool>(resp);
 }
 
+bool ChatServerUploadWorker::getObject(const std::string& bucket, const std::string& key, std::string& outData)
+{
+    minio::s3::GetObjectArgs args;
+    args.bucket = bucket;
+    args.object = key;
+
+    auto resp = getMinioClient().GetObject(args);
+    if(!resp)
+    {
+	logger.error("GetObject Error:" + resp.Error().String());
+	return false;
+    }
+
+    outData = resp.data;
+    return true;
+}
+
+bool ChatServerUploadWorker::putObject(const std::string& bucket, const std::string& key, const std::string& data, const std::string& mimeType)
+{
+    std::istringstream iss(data);
+    minio::s3::PutObjectArgs args;
+    args.stream = &iss;
+    args.part_size = std::max<size_t>(5 * 1024 * 1024, data.size());
+    args.bucket = bucket;
+    args.object = key;
+    args.size = data.size();
+    args.headers.Add("Content-Type", mimeType);
+
+    auto resp = getMinioClient().PutObject(args);
+    if(!resp)
+    {
+	logger.error("PutObject Error:" + resp.Error().String());
+	return false;
+    }
+    return true;
+}
+
 bool ChatServerUploadWorker::startsWith(const std::string& s, const std::string& prefix)
 {
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool ChatServerUploadWorker::generateThumbnailFromData(const std::string& bucket, const std::string& key, const std::string& originalData, std::string& outThumbUrl)
+{
+    size_t dotPos = key.find_last_of('.');
+    if(dotPos == std::string::npos)
+	return false;
+    
+    std::string suffix = key.substr(dotPos + 1);
+    for(char& c : suffix)
+	c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    
+    if(suffix != "jpg" && suffix != "jpeg" && suffix != "png")
+    {
+	logger.warn("generateThumbnail Error: not support suffix:" + suffix);
+	return false;
+    }
+
+    std::string thumbKey = key.substr(0, dotPos) + "thumbnail." + suffix;
+    std::string thumbUrl = "http://192.168.153.128/chat/" + thumbKey;
+    if(isExists(bucket, thumbKey))
+    {
+	outThumbUrl = thumbUrl;
+	return true;
+    }
+
+    if(originalData.empty())
+	return false;
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* pixels = stbi_load_from_memory(reinterpret_cast<const unsigned char*>(originalData.data()), static_cast<int>(originalData.size()), &width, &height, &channels, 0);
+
+    if(!pixels)
+    {
+	logger.error("stbi_load failed:" + key);
+	return false;
+    }
+
+    const int maxSide = 200;
+    int targetWidth = width;
+    int targetHeight = height;
+    if(width > maxSide || height > maxSide)
+    {
+	if(width >= height)
+	{
+	    targetWidth = maxSide;
+	    targetHeight = std::max(1, height * maxSide / width);
+	}
+	else 
+	{
+	    targetHeight = maxSide;
+	    targetWidth = std::max(1, width * maxSide / height);
+	}
+    }
+
+    if(targetWidth == width && targetHeight == height)
+    {
+	stbi_image_free(pixels);
+	outThumbUrl = "http://192.168.153.128/chat/" + key;
+	return true;
+    }
+
+    std::vector<unsigned char> thumbPixels(static_cast<size_t>(targetWidth) * targetHeight * channels);
+
+    stbir_pixel_layout layout;
+    if(channels == 4)
+	layout = STBIR_RGBA;
+    else if(channels == 3)
+	layout = STBIR_RGB;
+    else if(channels == 2)
+	layout = STBIR_RA;
+    else
+	layout = STBIR_1CHANNEL;
+
+    unsigned char* ret = stbir_resize_uint8_srgb(pixels, width, height, 0, thumbPixels.data(), targetWidth, targetHeight, 0, layout);
+    stbi_image_free(pixels);
+    pixels = nullptr;
+
+    if(!ret)
+    {
+	logger.error("stbir_resize failed:" + key);
+	return false;
+    }
+
+    std::string thumbData;
+    if(suffix == "png")
+    {
+	int len = 0;
+	unsigned char* png = stbi_write_png_to_mem(thumbPixels.data(), 0, targetWidth, targetHeight, channels, &len);
+	if(png)
+	{
+	    thumbData.assign(reinterpret_cast<char*>(png), len);
+	    std::free(png);
+	}
+    }
+    else
+    {
+	auto writeFunc = [](void* ctx, void* data, int size){
+	    reinterpret_cast<std::string*>(ctx)->append(reinterpret_cast<char*>(data), static_cast<size_t>(size));
+	};
+	stbi_write_jpg_to_func(writeFunc, &thumbData, targetWidth, targetHeight, channels, thumbPixels.data(), 85);
+    }
+
+    if(thumbData.empty())
+    {
+	logger.error("Thumbnail data is empty:" + key);
+	return false;
+    }
+
+    std::string mimeType = suffix == "png" ? "image/png" : "image/jpeg";
+    if(!putObject(bucket, thumbKey, thumbData, mimeType))
+	return false;
+
+    outThumbUrl = thumbUrl;
+    return true;
 }

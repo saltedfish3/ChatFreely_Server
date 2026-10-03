@@ -36,6 +36,7 @@ private:
     static void cb_uploadInit(evhttp_request* req, void* arg);
     static void cb_uploadPart(evhttp_request* req, void* arg);
     static void cb_uploadComplete(evhttp_request* req, void* arg);
+    static void cb_uploadSingle(evhttp_request* req, void* arg);
     static bool isExists(const std::string& bucket, const std::string& key);
     static std::string createUploadUrl(const std::string& bucket, const std::string& key);
     static std::string createMultipartUpload(const std::string& bucket, const std::string& key, const std::string& mimeType);
@@ -47,5 +48,8 @@ private:
     static std::string getUrlQueryParam(const std::string& url, const std::string& name);
     static bool getObjectSize(const std::string& bucket, const std::string& key, int64_t& outSize);
     static bool removeObject(const std::string& bucket, const std::string& key);
+    static bool getObject(const std::string& bucket, const std::string& key, std::string& outData);
+    static bool putObject(const std::string& bucket, const std::string& key, const std::string& data, const std::string& mimeType);
     static bool startsWith(const std::string& s, const std::string& prefix);
+    static bool generateThumbnailFromData(const std::string& bucket, const std::string& objectKey, const std::string& originalData, std::string& outThumbUrl);
 };
