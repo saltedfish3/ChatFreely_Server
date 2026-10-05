@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <string>
 #include <thread>
 #include <event2/event.h>
 #include <event2/buffer.h>
@@ -13,6 +14,7 @@
 #include <vector>
 #include "../global/GlobalVar.h"
 #include "../logger/Logger.h"
+#include "miniocpp/utils.h"
 
 class ChatServerUploadWorker
 {
@@ -43,6 +45,9 @@ private:
     static void abortMultipartUpload(const std::string& bucket, const std::string& key, const std::string& uploadId);
     static bool uploadPart(const std::string& bucket, const std::string& key, const std::string& uploadId, int partNumber, const char* data, size_t size, std::string& outEtag);
     static bool completeMultipartUpload(const std::string& bucket, const std::string& key, const std::string& uploadId, const std::vector<std::pair<int, std::string>>& parts);
+    static std::string sendSignedGet(const std::string& url, const minio::utils::Multimap& query_params_in);
+    static std::string findExistingMultipartUploadID(const std::string& bucket, const std::string& key);
+    static bool getUploadedParts(const std::string& bucket, const std::string& key, const std::string& uploadId, json& outParts);
 
     static bool verifyAccessToken(const evkeyvalq* evq);
     static std::string getUrlQueryParam(const std::string& url, const std::string& name);
@@ -52,4 +57,8 @@ private:
     static bool putObject(const std::string& bucket, const std::string& key, const std::string& data, const std::string& mimeType);
     static bool startsWith(const std::string& s, const std::string& prefix);
     static bool generateThumbnailFromData(const std::string& bucket, const std::string& objectKey, const std::string& originalData, std::string& outThumbUrl);
+
+    static std::string getXmlBlock(const std::string& xml, const std::string& tag);
+    static std::vector<std::string> getXmlBlocks(const std::string& xml, const std::string& tag);
+    static std::string decodeXmlEntities(const std::string& s);
 };

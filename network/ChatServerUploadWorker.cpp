@@ -1,6 +1,12 @@
 #include "ChatServerUploadWorker.h"
+#include <curlpp/Easy.hpp>
+#include <curlpp/Options.hpp>
+#include <curlpp/cURLpp.hpp>
+#include "miniocpp/utils.h"
+#include "miniocpp/signer.h"
 #include <cctype>
 #include <cstdlib>
+#include <exception>
 #include <sstream>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -23,7 +29,6 @@
 #include <event2/buffer.h>
 #include <event2/event.h>
 #include <event2/http.h>
-#include <filesystem>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -242,6 +247,84 @@ bool ChatServerUploadWorker::completeMultipartUpload(const std::string& bucket, 
     return true;
 }
 
+std::string ChatServerUploadWorker::sendSignedGet(const std::string& uri, const minio::utils::Multimap& query_params_in)
+{
+    auto date = minio::utils::UtcTime::Now();
+
+    minio::utils::Multimap headers;
+    headers.Add("Host", "192.168.153.128:9000");
+    headers.Add("X-Amz-Date", date.ToAmzDate());
+
+    minio::utils::Multimap query_params = query_params_in;
+    std::string empty_sha256 = minio::utils::Sha256Hash("");
+
+    minio::signer::SignV4S3(minio::http::Method::kGet, uri, "us-east-1", headers, query_params, "saltedfish_test", "saltedfish_test", empty_sha256, date);
+
+    std::string url = "http://192.168.153.128:9000" + uri + "?" + query_params.ToQueryString();
+
+    curlpp::Easy req;
+    req.setOpt(curlpp::options::Url(url));
+    req.setOpt(curlpp::options::CustomRequest("GET"));
+    req.setOpt(curlpp::options::HttpHeader(headers.ToHttpHeaders()));
+
+    std::ostringstream response;
+    req.setOpt(curlpp::options::WriteStream(&response));
+
+    try
+    {
+	req.perform();
+    }
+    catch(const std::exception& e)
+    {
+	logger.error(std::string("Signed Get Failed:") + e.what());
+	return "";
+    }
+
+    return response.str();
+}
+
+std::string ChatServerUploadWorker::findExistingMultipartUploadID(const std::string& bucket, const std::string& key)
+{
+    minio::utils::Multimap q;
+    q.Add("uploads", "");
+    q.Add("prefix", key);
+
+    std::string xml = sendSignedGet("/" + bucket, q);
+    if(xml.empty())
+	return "";
+
+    for(const auto& upload : getXmlBlocks(xml, "Upload"))
+    {
+	if(getXmlBlock(upload, "Key") == key)
+	    return getXmlBlock(upload, "UploadId");
+    }
+    return "";
+}
+
+bool ChatServerUploadWorker::getUploadedParts(const std::string& bucket, const std::string& key, const std::string& uploadId, json& outParts)
+{
+    minio::utils::Multimap q;
+    q.Add("uploadId", uploadId);
+
+    std::string xml = sendSignedGet("/" + bucket + "/" + key, q);
+    if(xml.empty())
+	return false;
+
+    for(const auto& part : getXmlBlocks(xml, "Part"))
+    {
+	std::string numStr = getXmlBlock(part, "PartNumber");
+	std::string etag = getXmlBlock(part, "ETag");
+	if(numStr.empty() || etag.empty())
+	    continue;
+
+	json item;
+	item["PartNumber"] = numStr;
+	item["ETag"] = etag;
+	outParts.push_back(item);
+    }
+    return true;
+}
+
 void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 {
     auto input_header = evhttp_request_get_input_headers(req);
@@ -399,25 +482,36 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 	}
 	else 
 	{
-	    std::string uploadId = createMultipartUpload("chat", key, mimeType);
-	    if(uploadId.empty())
+	    std::string uploadId = findExistingMultipartUploadID("chat", key);
+	    bool isNew = uploadId.empty();
+
+	    if(isNew)
 	    {
-		evhttp_send_reply(req, 500, nullptr, nullptr);
-		return;
+		uploadId = createMultipartUpload("chat", key, mimeType);
+		if(uploadId.empty())
+		{
+		    evhttp_send_reply(req, 500, nullptr, nullptr);
+		   return;
+		}
 	    }
 
 	    int64_t partCount = (size + part_size - 1) / part_size;
 	    if(partCount > max_part_count)
 	    {
-		abortMultipartUpload("chat", key, uploadId);
+		if(isNew)
+		    abortMultipartUpload("chat", key, uploadId);
 		evhttp_send_reply(req, 413, nullptr, nullptr);
 		return;
 	    }
+
+	    json uploadedParts = json::array();
+	    getUploadedParts("chat", key, uploadId, uploadedParts);
 
 	    resp["Exists"] = false;
 	    resp["ObjectKey"] = key;
 	    resp["UploadId"] = uploadId;
 	    resp["PartSize"] = std::to_string(part_size);
+	    resp["UploadedParts"] = uploadedParts;
 	}
     }
 
@@ -945,4 +1039,86 @@ bool ChatServerUploadWorker::generateThumbnailFromData(const std::string& bucket
 
     outThumbUrl = thumbUrl;
     return true;
+}
+
+std::string ChatServerUploadWorker::getXmlBlock(const std::string& xml, const std::string& tag)
+{
+    auto blocks = getXmlBlocks(xml, tag);
+    return blocks.empty() ? "" : decodeXmlEntities(blocks[0]);
+}
+
+std::vector<std::string> ChatServerUploadWorker::getXmlBlocks(const std::string& xml, const std::string& tag)
+{
+    std::vector<std::string> result;
+
+    std::string open = "<" + tag + ">";
+    std::string close = "</" + tag + ">";
+
+    size_t pos = 0;
+    while(true)
+    {
+	size_t start = xml.find(open, pos);
+	if(start == std::string::npos)
+	    break;
+	start += open.size();
+
+	size_t end = xml.find(close, start);
+	if(end == std::string::npos)
+	    break;
+
+	result.push_back(xml.substr(start, end - start));
+	pos = end + close.size();
+    }
+    return result;
+}
+
+std::string ChatServerUploadWorker::decodeXmlEntities(const std::string& s)
+{
+    std::string result;
+    result.reserve(s.size());
+
+    for(size_t i = 0; i < s.size();)
+    {
+	if(s[i] == '&')
+	{
+	    size_t end = s.find(';', i);
+	    if(end != std::string::npos && end - i < 10)
+	    {
+		std::string entity = s.substr(i + 1, end - i -1);
+		if(entity == "quot")
+		    result += '"';
+		else if(entity == "apos")
+		    result += '\'';
+		else if(entity == "lt")
+		    result += '<';
+		else if(entity == "gt")
+		    result += '>';
+		else if(entity == "amp")
+		    result += '&';
+		else if(entity.size() > 1 && entity[0] == '#')
+		{
+		    int code = 0;
+		    if(entity[1] == 'x' || entity[1] == 'X')
+		    {
+			char* endp = nullptr;
+			code = std::strtol(entity.c_str() + 2, &endp, 16);
+		    }
+		    else
+		    {
+			char* endp = nullptr;
+			code = std::strtol(entity.c_str() + 1, &endp, 10);
+		    }
+		    if(code > 0 && code < 128)
+			result += static_cast<char>(code);
+		}
+		else
+		    result += s.substr(i, end - i + 1);
+		i = end + 1;
+		continue;
+	    }
+	}
+	result += s[i];
+	i++;
+    }
+    return result;
 }
