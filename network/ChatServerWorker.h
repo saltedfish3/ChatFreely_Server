@@ -104,9 +104,9 @@ private:
 
     static void handleGetConversationsFriendUIDListAndSeq(session* sess, std::string accessToken, int64_t lastConvSyncSeq, const std::string requests_id);
 
-    static void handleSyncMessages(session* sess, std::string accessToken, const std::string friendUID, int64_t startConvSeq, int limit, const std::string requests_id);
+    static void handleSyncMessages(session* sess, std::string accessToken, const std::string conversationID, int64_t startConvSeq, int limit, const std::string requests_id);
 
-    static void handleSendMessage(session* sess, std::string accessToken, std::string receiverUID, int8_t contentType, const std::string content, const std::string tempmsgid, const std::string requests_id);
+    static void handleSendMessage(session* sess, std::string accessToken, std::string conversationID, int8_t contentType, const std::string content, const std::string tempmsgid, const std::string requests_id);
 
     static void handleRefreshToken(session* sess, std::string refreshToken, const std::string requests_id);
 
@@ -120,12 +120,12 @@ private:
 
     static void pushFriendAvatar(int64_t changeUID, const std::string& avatar);
 
-    static void pushNewMessage(int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, int8_t contentType, const std::string& content, int64_t convSeq);
+    static void pushNewMessage(int64_t conversationID, int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, int8_t contentType, const std::string& content, int64_t convSeq);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);
     static bool isSID(const std::string& sid);
-    static bool isUID(const std::string& uid);
+    static bool isSnowID(const std::string& id);
     static std::string hash_password(const std::string& password);
     static bool verify_password(const std::string& password, const std::string& stored_hash);
 
