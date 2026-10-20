@@ -1,4 +1,5 @@
 #include "SQL.h"
+#include <mysql/mysql.h>
 
 SQL::SQL(uint minutes_timeAlive, uint minutes_timeFree)
     :res(nullptr),
@@ -208,4 +209,13 @@ bool SQL::ping()
 MYSQL* SQL::getMysql()
 {
     return this->mysql;
+}
+
+void SQL::freeResult()
+{
+    if(this->stmt)
+    {
+	mysql_stmt_free_result(this->stmt);
+	mysql_stmt_reset(this->stmt);
+    }
 }

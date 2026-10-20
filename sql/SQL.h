@@ -28,6 +28,7 @@ public:
     void setLastTimeBack();
     bool isAlive();
     bool isOverFree();
+    void freeResult();
 
     MYSQL* getMysql();
 private:

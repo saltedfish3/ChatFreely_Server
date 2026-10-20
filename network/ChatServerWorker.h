@@ -21,6 +21,7 @@
 #include <optional>
 #include <sodium.h>
 #include <jwt-cpp/jwt.h>
+#include <vector>
 
 #include "../global/GlobalVar.h"
 #include "../third_party/json.hpp"
@@ -97,10 +98,17 @@ private:
     static void handleUpdateUsername(session* sess, std::string username, std::string accessToken, const std::string requests_id);
 
     static void handleAddNewFriendRequest(session* sess, std::string receiver_info, std::string verification_msg, std::string accessToken, const std::string requests_id);
+    static void handleCreateGroupRequest(session* sess, std::string groupName, std::vector<std::string> inviteUIDs, std::string inviteMsg, std::string accessToken, const std::string requests_id);
+    static void handleApplyJoinGroupRequest(session* sess, std::string accessToken, std::string groupID, std::string verMsg, const std::string requests_id);
     static void handleHandleNewFriendRequest(session* sess, std::string handle_uid, bool isAgree, std::string accessToken, const std::string requests_id);
+    static void handleHandleNewGroupJoinRequest(session* sess, std::string handle_requestID, bool isAgree, std::string accessToken, const std::string requests_id);
     static void handleGetNewFriendRequestsList(session* sess, std::string accessToken, const std::string requests_id);
 
+    static void handleGetNewGroupJoinRequestsList(session* sess, std::string accessToken, const std::string requests_id);
+
     static void handleGetFriendList(session* sess, std::string accessToken, const std::string requests_id);
+    
+    static void handleGetGroupList(session* sess, std::string accessToken, const std::string requests_id);
 
     static void handleGetConversationsFriendUIDListAndSeq(session* sess, std::string accessToken, int64_t lastConvSyncSeq, const std::string requests_id);
 
@@ -114,6 +122,8 @@ private:
 
     static void pushNewFriend(int64_t sendUID, int64_t pushUID);
 
+    static void pushNewGroup(int64_t pushUID, const std::string& conversationID, const std::string& groupID, const std::string& groupName, const std::string& avatarUrl, const std::string& ownerUID, json memberInfos_arr);
+
     static void pushFriendStatus(int64_t changeUID, bool isOnline);
 
     static void pushFriendUsername(int64_t changeUID, const std::string& username);
@@ -121,6 +131,8 @@ private:
     static void pushFriendAvatar(int64_t changeUID, const std::string& avatar);
 
     static void pushNewMessage(int64_t conversationID, int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, int8_t contentType, const std::string& content, int64_t convSeq);
+
+    static void pushGroupJoinRequest(int64_t pushUID, int64_t requestID, const std::string& groupName, int8_t source, const std::string& displayAvatarUrl, const std::string& displayName, int64_t sid, const std::string& inviterName, const std::string& verMsg);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);
