@@ -3422,6 +3422,20 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 		}
 
 		if(conversationType < 0)
+		{
+		    std::string sql = "SELECT 1 FROM friendships WHERE id = ?;";
+		    MYSQL_BIND bind_param;
+		    initLongLongParam(&bind_param, &conversationID_int, sizeof(conversationID_int));
+
+		    MYSQL_BIND result_param;
+		    int8_t is_friend = 0;
+		    initTinyIntParam(&result_param, &is_friend, sizeof(is_friend));
+
+		    if(con->executeSql(sql, &bind_param, &result_param) && con->nextData() > 0)
+			conversationType = 0;
+		}
+
+		if(conversationType < 0)
 		    info = "会话不存在";
 		else
 		{
