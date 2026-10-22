@@ -110,6 +110,8 @@ private:
     
     static void handleGetGroupList(session* sess, std::string accessToken, const std::string requests_id);
 
+    static void handleGetGroupInfo(session* sess, std::string accessToken, std::string conversationID, const std::string requests_id);
+
     static void handleGetConversationsFriendUIDListAndSeq(session* sess, std::string accessToken, int64_t lastConvSyncSeq, const std::string requests_id);
 
     static void handleSyncMessages(session* sess, std::string accessToken, const std::string conversationID, int64_t startConvSeq, int limit, const std::string requests_id);

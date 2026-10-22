@@ -486,7 +486,21 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	    return;
 	}
 	handleApplyJoinGroupRequest(sess, j.value("AccessToken", ""), j.value("GroupID", ""), j.value("VerMsg", ""), requests_id.str());
-    } 
+    }
+    else if(type == "GetGroupInfoRequest")
+    {
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
+	{
+	    logger.warn("Json No AccessToken");
+	    return;
+	}
+	if(!j.contains("ConversationID") || !j["ConversationID"].is_string())
+	{
+	    logger.warn("Json No Param");
+	    return;
+	}
+	handleGetGroupInfo(sess, j.value("AccessToken", ""), j.value("ConversationID", ""), requests_id.str());
+    }
     else
     {
 	logger.warn("Pack Type Error");
@@ -2663,6 +2677,114 @@ void ChatServerWorker::handleGetGroupList(session* sess, std::string accessToken
 	    
 	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
 	});
+	timeval tv{0, 0};
+	event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	    auto* func = static_cast<std::function<void()>*>(arg);
+	    (*func)();
+	    delete func;
+	}, func, &tv);
+    });
+}
+
+void ChatServerWorker::handleGetGroupInfo(session* sess, std::string accessToken, std::string conversationID, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([sessPtr, accessToken, conversationID, requests_id](){
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && uid_token != -1 && sessPtr->uid.value() == uid_token;
+	bool result = false;
+	json arr = json::array();
+	json groupInfo;
+
+	if(uidValid && isSnowID(conversationID))
+	{
+	    int64_t conversationID_int = std::stoll(conversationID);
+	    GuardConnection con(SQLPool::getSQLPool());
+	    if(con)
+	    {
+		std::string sql = "SELECT g.name, g.avatar_url, g.owner_uid, g.id FROM chat_groups g JOIN group_members gm ON gm.conversation_id = g.snowid WHERE g.snowid = ? AND gm.uid = ? AND gm.status = 0 AND g.status = 0;";
+
+		MYSQL_BIND bind_param[2];
+		initLongLongParam(&bind_param[0], &conversationID_int, sizeof(conversationID_int));
+		initLongLongParam(&bind_param[1], &uid_token, sizeof(uid_token));
+
+		char buf_groupName[64 * 4];
+		unsigned long len_groupName = 0;
+		char buf_avatarUrl[512 * 4];
+		unsigned long len_avatarUrl = 0;
+		int64_t owner_uid = 0;
+		int64_t group_id = 0;
+
+		MYSQL_BIND result_param[4];
+		initStringParam(&result_param[0], buf_groupName, sizeof(buf_groupName), &len_groupName);
+		initStringParam(&result_param[1], buf_avatarUrl, sizeof(buf_avatarUrl), &len_avatarUrl);
+		initLongLongParam(&result_param[2], &owner_uid, sizeof(owner_uid));
+		initLongLongParam(&result_param[3], &group_id, sizeof(group_id));
+
+		if(con->executeSql(sql, bind_param, result_param) && con->nextData() > 0)
+		{
+		    groupInfo["ConversationID"] = conversationID;
+		    groupInfo["GroupName"] = std::string(buf_avatarUrl, len_avatarUrl);
+		    groupInfo["Avatar_Url"] = std::string(buf_avatarUrl, len_avatarUrl);
+		    groupInfo["OwnerUID"] = std::to_string(owner_uid);
+		    groupInfo["GroupID"] = std::to_string(group_id);
+
+		    std::string sql_members = "SELECT u.id, u.snowid, u.username, u.avatar_url FROM user u JOIN group_members gm ON gm.uid = u.snowid WHERE gm.conversation_id = ? AND gm.status = 0 AND u.status = 0;";
+
+		    MYSQL_BIND bind_param_m;
+		    initLongLongParam(&bind_param_m, &conversationID_int, sizeof(conversationID_int));
+
+		    int64_t sid = 0;
+		    int64_t uid = 0;
+		    char buf_username[64 * 4];
+		    unsigned long len_username = 0;
+		    char buf_avatarUrl_member[512 * 4];
+		    unsigned long len_avatarUrl_member = 0;
+
+		    MYSQL_BIND result_param_m[4];
+		    initLongLongParam(&result_param_m[0], &sid, sizeof(sid));
+		    initLongLongParam(&result_param_m[1], &uid, sizeof(uid));
+		    initStringParam(&result_param_m[2], buf_username, sizeof(buf_username), &len_username);
+		    initStringParam(&result_param_m[3], buf_avatarUrl_member, sizeof(buf_avatarUrl_member), &len_avatarUrl_member);
+
+		    con->freeResult();
+		    if(con->executeSql(sql_members, &bind_param_m, result_param_m))
+		    {
+			while(con->nextData() > 0)
+			{
+			    json member;
+			    member["SID"] = std::to_string(sid);
+			    member["UID"] = std::to_string(uid);
+			    member["Username"] = std::string(buf_username, len_username);
+			    member["AvatarUrl"] = std::string(buf_avatarUrl_member, len_avatarUrl_member);
+			    arr.push_back(member);
+			    
+			    len_username = 0;
+			    len_avatarUrl_member = 0;
+			}
+			groupInfo["MemberInfos"] = arr;
+			result = true;
+		    }
+		}
+	    }
+	}
+	auto* func = new std::function<void()>([result, sessPtr, requests_id, groupInfo, uidValid, conversationID](){
+	    json j;
+	    j["Requests_id"] = requests_id;
+	    j["Type"] = "GetGroupInfoRequestResp";
+	    j["Result"] = result;
+	    j["ConversationID"] = conversationID;
+	    if(result)
+		j["GroupInfo"] = groupInfo;
+	    else
+	    {
+		if(!uidValid)
+		    j["AccessTokenExpired"] = true;
+	    }
+	    std::string data = j.dump() + "\n";
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	});
+
 	timeval tv{0, 0};
 	event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
 	    auto* func = static_cast<std::function<void()>*>(arg);
