@@ -284,6 +284,20 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	}
 	handleUpdateUsername(sess, j.value("Username", ""), j.value("AccessToken", ""), requests_id.str());
     }
+    else if(type == "UpdateGroupNameRequest")
+    {
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
+	{
+	    logger.warn("Json no AccessToken");
+	    return;
+	}
+	if(!j.contains("ConversationID") || !j["ConversationID"].is_string() || !j.contains("GroupName") || !j["GroupName"].is_string())
+	{
+	    logger.warn("Json no param");
+	    return;
+	}
+	handleUpdateGroupNameRequest(sess, j.value("AccessToken", ""), j.value("ConversationID", ""), j.value("GroupName", ""), requests_id.str());
+    }
     else if(type == "AddNewFriendRequest")
     {
 	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
@@ -1099,6 +1113,110 @@ void ChatServerWorker::handleUpdateUsername(session* sess, std::string username,
 		    j["Result"] = false;
 		    j["AccessTokenExpired"] = true;
 		}
+		if(!j.value("AccessTokenExpired", false))
+		    sessPtr->myself->setCache(requests_id, j, 300);
+	    }
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	});
+	timeval tv{0, 0};
+	event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	    auto* func = static_cast<std::function<void()>*>(arg);
+	    (*func)();
+	    delete func;
+	}, func, &tv);
+    });
+}
+
+void ChatServerWorker::handleUpdateGroupNameRequest(session* sess, std::string accessToken, std::string conversationID, std::string groupName, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([accessToken, conversationID, groupName, requests_id, sessPtr](){
+	json j_Cache;
+	bool isCache = sessPtr->myself->tryGetCache(requests_id, j_Cache);
+	bool result = false;
+	std::string info;
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && sessPtr->uid.value() == uid_token && uid_token != -1;
+
+	if(groupName.empty())
+	    info = "群名不能为空";
+	else if(groupName.size() > 64)
+	    info = "群名长度不能大于64个字符";
+	else if(uidValid)
+	{
+	    GuardConnection con(SQLPool::getSQLPool());
+	    if(!con)
+		logger.error("UpdateGroupName get con error");
+	    else
+	    {
+		SQLTransaction sqlTrans(con->getMysql());
+		bool ok = [&]() -> bool {
+		    int64_t conversationID_int = std::stoll(conversationID);
+		    {
+			std::string sql = "SELECT 1 FROM chat_groups WHERE snowid = ? AND owner_uid = ? AND status = 0;";
+			MYSQL_BIND bind_param[2];
+			initLongLongParam(&bind_param[0], &conversationID_int, sizeof(conversationID_int));
+			initLongLongParam(&bind_param[1], &uid_token, sizeof(uid_token));
+
+			int8_t status = 0;
+			MYSQL_BIND result_param;
+			initTinyIntParam(&result_param, &status, sizeof(status));
+			if(!con->executeSql(sql, bind_param, &result_param) || con->nextData() <= 0)
+			{
+			    info = "用户权限不足";
+			    return false;
+			}
+			con->freeResult();
+		    }
+
+		    {
+			std::string sql = "UPDATE chat_groups SET name = ? WHERE snowid = ? AND status = 0;";
+			MYSQL_BIND bind_param[2];
+			unsigned long len_groupName = groupName.size();
+			initStringParam(&bind_param[0], (char*)groupName.data(), groupName.size(), &len_groupName);
+			initLongLongParam(&bind_param[1], &conversationID_int, sizeof(conversationID_int));
+
+			if(!con->executeSql(sql, bind_param))
+			{
+			    logger.error("UpdateGroupName execute sql failed");
+			    return false;
+			}
+
+			my_ulonglong rows = con->getAffectRows();
+			if(rows <= 0 || rows >= (my_ulonglong)-2)
+			{
+			    logger.error("UpdateGroupName insert affected rows 0");
+			    return false;
+			}
+		    }
+		    return true;
+		}();
+
+		if(ok)
+		{
+		    con->freeResult();
+		    sqlTrans.commit();
+		    result = true;
+		}
+	    }
+	}
+	auto* func = new std::function<void()>([sessPtr, result, requests_id, uidValid, isCache, j_Cache, conversationID, groupName](){
+	    json j;
+	    if(isCache)
+		j = j_Cache;
+	    else
+	    {
+		j["Requests_id"] = requests_id;
+		j["Type"] = "UpdateGroupNameRequestResp";
+		j["Result"] = result;
+		j["ConversationID"] = conversationID;
+		if(result)
+		    j["GroupName"] = groupName;
+		if(!uidValid)
+		    j["AccessTokenExpired"] = true;
+		
 		if(!j.value("AccessTokenExpired", false))
 		    sessPtr->myself->setCache(requests_id, j, 300);
 	    }
@@ -2724,7 +2842,7 @@ void ChatServerWorker::handleGetGroupInfo(session* sess, std::string accessToken
 		if(con->executeSql(sql, bind_param, result_param) && con->nextData() > 0)
 		{
 		    groupInfo["ConversationID"] = conversationID;
-		    groupInfo["GroupName"] = std::string(buf_avatarUrl, len_avatarUrl);
+		    groupInfo["GroupName"] = std::string(buf_groupName, len_groupName);
 		    groupInfo["Avatar_Url"] = std::string(buf_avatarUrl, len_avatarUrl);
 		    groupInfo["OwnerUID"] = std::to_string(owner_uid);
 		    groupInfo["GroupID"] = std::to_string(group_id);

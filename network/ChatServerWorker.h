@@ -97,6 +97,8 @@ private:
     static void handleUnLogin(session* sess, std::string accessToken, const std::string requests_id);
     static void handleUpdateUsername(session* sess, std::string username, std::string accessToken, const std::string requests_id);
 
+    static void handleUpdateGroupNameRequest(session* sess, std::string accessToken, std::string conversationID, std::string groupName, const std::string requests_id);
+
     static void handleAddNewFriendRequest(session* sess, std::string receiver_info, std::string verification_msg, std::string accessToken, const std::string requests_id);
     static void handleCreateGroupRequest(session* sess, std::string groupName, std::vector<std::string> inviteUIDs, std::string inviteMsg, std::string accessToken, const std::string requests_id);
     static void handleApplyJoinGroupRequest(session* sess, std::string accessToken, std::string groupID, std::string verMsg, const std::string requests_id);
