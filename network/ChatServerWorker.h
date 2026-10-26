@@ -101,6 +101,8 @@ private:
 
     static void handleUpdateGroupAvatarRequest(session* sess, std::string accessToken, std::string conversationID, std::string avatarUrl, const std::string requests_id);
 
+    static void handleDeleteFriendRequest(session* sess, std::string accessToken, std::string conversationID, const std::string requests_id);
+
     static void handleAddNewFriendRequest(session* sess, std::string receiver_info, std::string verification_msg, std::string accessToken, const std::string requests_id);
     static void handleCreateGroupRequest(session* sess, std::string groupName, std::vector<std::string> inviteUIDs, std::string inviteMsg, std::string accessToken, const std::string requests_id);
     static void handleApplyJoinGroupRequest(session* sess, std::string accessToken, std::string groupID, std::string verMsg, const std::string requests_id);
@@ -139,6 +141,8 @@ private:
     static void pushNewMessage(int64_t conversationID, int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, int8_t contentType, const std::string& content, int64_t convSeq);
 
     static void pushGroupJoinRequest(int64_t pushUID, int64_t requestID, const std::string& groupName, int8_t source, const std::string& displayAvatarUrl, const std::string& displayName, int64_t sid, const std::string& inviterName, const std::string& verMsg);
+
+    static void pushFriendDeleted(int64_t pushUID, int64_t conversationID);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);
