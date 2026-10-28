@@ -32,33 +32,6 @@
 #include "../sql/GuardConnect.h"
 #include "../logger/Logger.h"
 
-//Message Type(client)
-//Heartbeat Login Register Send Hello
-//Heartbeat 
-//Login	    "Email":String  "Password":String
-//Register  "Username":String   "Email":String  "Password":String
-//Send	    "From":StringID	To":StringID  "Content":String
-//Update_Avatar  "Url":String
-//UnLogin
-//UpdateUsername  "Username":String
-//AddNewFriendRequest "UID":String "Receiver_Email/Receiver_SID":String "VerMsg":String
-//HandleNewFriendRequest "Status":bool "UID":String "HandleUID":String
-//GetNewFriendRequestsList "UID":String
-//
-//Message Type(server)
-//HeartbeatResp LoginResp RegisterResp Message HelloResp
-//HeartbeatResp
-//LoginResp "Result":bool  "Info":String  if true --->  "UID":int64_t "SID":int64_t	if false --->  "From":"Email/Password"
-//RegisterResp "Result":bool  "Info":String  if false --->  "From":"Email/Password/username"
-//Message "IsGroup":bool  "From":StringID  "Content":String
-//HelloResp "HeartbeatNum":int
-//UpdateAvatarResp   "Result":bool
-//UnLoginResp
-//UpdateUsernameResp  "Result":bool
-//AddNewFriendRequestResp "Result":bool "Info":String
-//HandleNewFriendRequestResp "Result":bool
-//GetNewFriendRequestsListResp "Result":bool "List":list-array
-
 class ChatServerWorker
 {
     using json = nlohmann::json;
@@ -103,6 +76,10 @@ private:
 
     static void handleDeleteFriendRequest(session* sess, std::string accessToken, std::string conversationID, const std::string requests_id);
 
+    static void handleExitGroupRequest(session* sess, std::string accessToken, std::string conversationID, const std::string requests_id);
+
+    static void handleDismissGroupRequest(session* sess, std::string accessToken, std::string conversationID, const std::string requests_id);
+
     static void handleAddNewFriendRequest(session* sess, std::string receiver_info, std::string verification_msg, std::string accessToken, const std::string requests_id);
     static void handleCreateGroupRequest(session* sess, std::string groupName, std::vector<std::string> inviteUIDs, std::string inviteMsg, std::string accessToken, const std::string requests_id);
     static void handleApplyJoinGroupRequest(session* sess, std::string accessToken, std::string groupID, std::string verMsg, const std::string requests_id);
@@ -119,6 +96,8 @@ private:
     static void handleGetGroupInfo(session* sess, std::string accessToken, std::string conversationID, const std::string requests_id);
 
     static void handleGetConversationsFriendUIDListAndSeq(session* sess, std::string accessToken, int64_t lastConvSyncSeq, const std::string requests_id);
+
+    static void handleGetDeletedConversationInfo(session* sess, std::string accessToken, std::vector<std::string> friendConversationIDs, std::vector<std::string> groupConversationIDs, const std::string requests_id);
 
     static void handleSyncMessages(session* sess, std::string accessToken, const std::string conversationID, int64_t startConvSeq, int limit, const std::string requests_id);
 
@@ -143,6 +122,8 @@ private:
     static void pushGroupJoinRequest(int64_t pushUID, int64_t requestID, const std::string& groupName, int8_t source, const std::string& displayAvatarUrl, const std::string& displayName, int64_t sid, const std::string& inviterName, const std::string& verMsg);
 
     static void pushFriendDeleted(int64_t pushUID, int64_t conversationID);
+
+    static void pushGroupDismiss(int64_t pushUID, int64_t conversationID);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);
