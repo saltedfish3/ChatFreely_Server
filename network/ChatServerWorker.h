@@ -85,6 +85,7 @@ private:
     static void handleApplyJoinGroupRequest(session* sess, std::string accessToken, std::string groupID, std::string verMsg, const std::string requests_id);
     static void handleHandleNewFriendRequest(session* sess, std::string handle_uid, bool isAgree, std::string accessToken, const std::string requests_id);
     static void handleHandleNewGroupJoinRequest(session* sess, std::string handle_requestID, bool isAgree, std::string accessToken, const std::string requests_id);
+    static void handleRemoveGroupMemberRequest(session* sess, std::string accessToken, std::string conversationID, std::string removeUID, const std::string requests_id);
     static void handleGetNewFriendRequestsList(session* sess, std::string accessToken, const std::string requests_id);
 
     static void handleGetNewGroupJoinRequestsList(session* sess, std::string accessToken, const std::string requests_id);
@@ -124,6 +125,8 @@ private:
     static void pushFriendDeleted(int64_t pushUID, int64_t conversationID);
 
     static void pushGroupDismiss(int64_t pushUID, int64_t conversationID);
+
+    static void pushRemoveGroupMember(int64_t pushUID, int64_t conversationID);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);

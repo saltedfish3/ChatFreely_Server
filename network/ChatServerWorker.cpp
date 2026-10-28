@@ -413,6 +413,21 @@ void ChatServerWorker::unPack(const char* line_json, session* sess)
 	bool isAgree = j.value("Status", false);
 	handleHandleNewGroupJoinRequest(sess, handle_requestID, isAgree, j.value("AccessToken", ""), requests_id.str());
     }
+    else if(type == "RemoveGroupMember")
+    {
+	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
+	{
+	    logger.warn("Json No AccessToken");
+	    return;
+	}
+	if(!j.contains("ConversationID") || !j["ConversationID"].is_string() || !j.contains("RemoveUID") || !j["RemoveUID"].is_string())
+	{
+	    logger.warn("RemoveGroupMember no param");
+	    return;
+	}
+	
+	handleRemoveGroupMemberRequest(sess, j.value("AccessToken", ""), j.value("ConversationID", ""), j.value("RemoveUID", ""), requests_id.str());
+    }
     else if(type == "GetNewFriendRequestsList")
     {
 	if(!j.contains("AccessToken") || !j["AccessToken"].is_string())
@@ -2891,6 +2906,184 @@ void ChatServerWorker::handleHandleNewGroupJoinRequest(session* sess, std::strin
     });
 }
 
+void ChatServerWorker::handleRemoveGroupMemberRequest(session* sess, std::string accessToken, std::string conversationID, std::string removeUID, const std::string requests_id)
+{
+    auto sessPtr = sess->shared_from_this();
+    ThreadPool::getThreadPool()->addTask([sessPtr, accessToken, conversationID, removeUID, requests_id](){
+	bool result = false;
+	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
+	bool uidValid = sessPtr->uid.has_value() && sessPtr->uid.value() == uid_token && uid_token != -1;
+	std::string info;
+
+	if(uidValid)
+	{
+	    if(!isSnowID(conversationID) || !isSnowID(removeUID))
+	    {
+		info = "踢出成员失败，请稍候重试";
+	    }
+	    else
+	    {
+		int64_t conversationID_int = std::stoll(conversationID);
+		int64_t removeUID_int = std::stoll(removeUID);
+		GuardConnection con(SQLPool::getSQLPool());
+		if(!con)
+		    logger.error("RemoveGroupMember get con failed");
+		else
+		{
+		    SQLTransaction sqlTrans(con->getMysql());
+		    bool ok = [&]() -> bool {
+			{
+			    std::string sql = "SELECT owner_uid, status FROM chat_groups WHERE snowid = ? LIMIT 1;";
+			    MYSQL_BIND bind_param;
+			    initLongLongParam(&bind_param, &conversationID_int, sizeof(conversationID_int));
+
+			    int64_t owner_uid = 0;
+			    int8_t status = 0;
+			    MYSQL_BIND result_param[2];
+			    initLongLongParam(&result_param[0], &owner_uid, sizeof(owner_uid));
+			    initTinyIntParam(&result_param[1], &status, sizeof(status));
+
+			    if(!con->executeSql(sql, &bind_param, result_param))
+			    {
+				logger.error("RemoveGroupMember execute sql failed");
+				return false;
+			    }
+			    
+			    if(con->nextData() <= 0)
+			    {
+				info = "群聊不存在";
+				return false;
+			    }
+
+			    if(status != 0)
+			    {
+				info = "群聊已解散";
+				return false;
+			    }
+
+			    if(owner_uid != uid_token)
+			    {
+				info = "只有群主才能踢出成员";
+				return false;
+			    }
+
+			    con->freeResult();
+			}
+
+			{
+			    std::string sql = "SELECT role, status FROM group_members WHERE conversation_id = ? AND uid = ? LIMIT 1;";
+
+			    MYSQL_BIND bind_param[2];
+			    initLongLongParam(&bind_param[0], &conversationID_int, sizeof(conversationID_int));
+			    initLongLongParam(&bind_param[1], &removeUID_int, sizeof(removeUID_int));
+
+			    int8_t role = 0;
+			    int8_t status = 0;
+			    MYSQL_BIND result_param[2];
+			    initTinyIntParam(&result_param[0], &role, sizeof(role));
+			    initTinyIntParam(&result_param[1], &status, sizeof(status));
+
+			    if(!con->executeSql(sql, bind_param, result_param))
+			    {
+				logger.error("RemoveGroupMember execute sql failed");
+				return false;
+			    }
+			    
+			    if(con->nextData() <= 0)
+			    {
+				logger.error("该用户不在该群聊中");
+				return false;
+			    }
+
+			    if(role == 0)
+			    {
+				info = "不能踢出自己";
+				return false;
+			    }
+
+			    if(status != 0)
+			    {
+				info = "该用户不在该群聊中";
+				return false;
+			    }
+
+			    con->freeResult();
+			}
+
+			{
+			    std::string sql = "UPDATE group_members SET status = 1 WHERE conversation_id = ? AND uid = ? AND status = 0;";
+			    MYSQL_BIND bind_param[2];
+			    initLongLongParam(&bind_param[0], &conversationID_int, sizeof(conversationID_int));
+			    initLongLongParam(&bind_param[1], &removeUID_int, sizeof(removeUID_int));
+
+			    if(!con->executeSql(sql, bind_param))
+			    {
+				logger.error("RemoveGroupMember execute sql failed");
+				return false;
+			    }
+
+			    my_ulonglong rows = con->getAffectRows();
+			    if(rows <= 0 || rows >= (my_ulonglong)-2)
+			    {
+				logger.error("RemoveGroupMember update affected rows 0");
+				return false;
+			    }
+			}
+
+			{
+			    std::string sql = "UPDATE group_join_requests SET verification_msg = NULL, handled_at = NOW(), status = 2 WHERE conversation_id = ? AND target_uid = ? AND status IN (0, 1);";
+			    MYSQL_BIND bind_param[2];
+			    initLongLongParam(&bind_param[0], &conversationID_int, sizeof(conversationID_int));
+			    initLongLongParam(&bind_param[1], &removeUID_int, sizeof(removeUID_int));
+
+			    if(!con->executeSql(sql, bind_param))
+			    {
+				logger.error("RemoveGroupMember update group_join_requests failed");
+				return false;
+			    }
+			}
+
+			return true;
+		    }();
+
+		    if(ok)
+		    {
+			con->freeResult();
+			sqlTrans.commit();
+			result = true;
+		    }
+		}
+	    }
+	}
+	auto* func = new std::function<void()>([result, sessPtr, requests_id, conversationID, removeUID, uidValid, info](){
+	    json j;
+	    j["Requests_id"] = requests_id;
+	    j["Type"] = "RemoveGroupMemberResp";
+	    j["Result"] = result;
+	    j["ConversationID"] = conversationID;
+	    j["RemoveUID"] = removeUID;
+
+	    if(!result)
+		j["Info"] = info;
+
+	    if(!uidValid)
+		j["AccessTokenExpired"] = true;
+	    std::string data = j.dump() + "\n";
+	    
+	    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv{0, 0};
+	    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	}, func, &tv);
+
+	if(result)
+	    pushRemoveGroupMember(std::stoll(removeUID), std::stoll(conversationID));
+    });
+}
+
 void ChatServerWorker::handleGetNewFriendRequestsList(session* sess, std::string accessToken, const std::string requests_id)
 {
     auto sessPtr = sess->shared_from_this();
@@ -3003,7 +3196,7 @@ void ChatServerWorker::handleGetNewGroupJoinRequestsList(session* sess, std::str
 		std::unordered_map<int64_t, int64_t> snowidToInviterUID;
 		bool ok = [&]() -> bool {
 		    {
-			std::string sql = "SELECT gjr.snowid, cg.name, cg.avatar_url, gjr.source, gjr.verification_msg, gjr.initiator_uid FROM group_join_requests gjr JOIN chat_groups cg ON cg.snowid = gjr.conversation_id WHERE gjr.status = 0 AND cg.status = 0 AND (gjr.target_uid = ? OR (gjr.source = 1 AND cg.owner_uid = ?));";
+			std::string sql = "SELECT gjr.snowid, cg.name, cg.avatar_url, gjr.source, gjr.verification_msg, gjr.initiator_uid FROM group_join_requests gjr JOIN chat_groups cg ON cg.snowid = gjr.conversation_id WHERE gjr.status = 0 AND cg.status = 0 AND ((gjr.target_uid = ? AND gjr.source = 0) OR (gjr.source = 1 AND cg.owner_uid = ?));";
 
 			int64_t uid = sessPtr->uid.value();
 			MYSQL_BIND bind_param[2];
@@ -4312,6 +4505,37 @@ void ChatServerWorker::pushGroupDismiss(int64_t pushUID, int64_t conversationID)
 	json j;
 	j["Requests_id"] = "125433710";
 	j["Type"] = "PushGroupDismiss";
+	j["ConversationID"] = std::to_string(conversationID);
+
+	std::string data = j.dump() + "\n";
+		
+	bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
+    });
+    timeval tv{0, 0};
+    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	auto* func = static_cast<std::function<void()>*>(arg);
+	(*func)();
+	delete func;
+    }, func, &tv);
+}
+
+void ChatServerWorker::pushRemoveGroupMember(int64_t pushUID, int64_t conversationID)
+{
+    std::shared_ptr<session> pushSessPtr;
+    {
+	std::shared_lock lock(mutex_onlineUser);
+	auto it = onlineUser.find(pushUID);
+	if(it == onlineUser.end())
+	    return;
+	pushSessPtr = it->second->sessPtr.lock();
+    }
+    if(!pushSessPtr)
+	return;
+
+    auto* func = new std::function<void()>([pushSessPtr, conversationID](){
+	json j;
+	j["Requests_id"] = "125433711";
+	j["Type"] = "PushRemoveGroupMember";
 	j["ConversationID"] = std::to_string(conversationID);
 
 	std::string data = j.dump() + "\n";
