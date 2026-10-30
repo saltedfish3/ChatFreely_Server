@@ -43,7 +43,7 @@ public:
     void run();
     void stop();
     bool isRun();    
-    void addConnect(int fd);
+    void addConnect(int fd, const std::string& client_ip);
 
 private:
     struct UserInfo

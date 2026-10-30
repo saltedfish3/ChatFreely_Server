@@ -30,6 +30,7 @@ public:
     bool del(const std::string& key);
     bool publish(const std::string& channel, const std::string& message);
     std::vector<std::optional<std::string>> mget(const std::vector<std::string>& keys);
+    long long incr(const std::string& key);
 
 private:
     RedisClient();

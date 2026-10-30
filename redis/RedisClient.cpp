@@ -146,3 +146,17 @@ std::vector<std::optional<std::string>> RedisClient::mget(const std::vector<std:
     }
     return result;
 }
+
+long long RedisClient::incr(const std::string& key)
+{
+    if(!this->redis)
+	return 0;
+
+    try
+    {
+	return this->redis->incr(key);
+    }catch(const sw::redis::Error&)
+    {
+	return 0;
+    }
+}

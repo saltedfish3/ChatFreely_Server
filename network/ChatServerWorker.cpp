@@ -27,6 +27,7 @@
 #include <sodium/utils.h>
 #include <stdexcept>
 #include <string>
+#include <sys/socket.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -90,7 +91,7 @@ void ChatServerWorker::stop()
     }
 }
 
-void ChatServerWorker::addConnect(int fd)
+void ChatServerWorker::addConnect(int fd, const std::string& client_ip)
 {
     if(!base)
     {
@@ -110,6 +111,7 @@ void ChatServerWorker::addConnect(int fd)
     sess->bev = bev;
     sess->weak_self = sess;
     sess->clientSessionID = "wait_hello" + std::to_string(fd);
+    sess->client_ip = client_ip;
 
     this->list_session.emplace(fd,sess);
 
@@ -708,6 +710,34 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
     //get uid and judge is online?
     ThreadPool::getThreadPool()->addTask([email = std::move(email),password = std::move(password),sessPtr, requests_id]() 
     {
+	std::string rate_key = "rate:login:" + sessPtr->client_ip;
+	long long time = RedisClient::getClient().incr(rate_key);
+	if(time == 1)
+	    RedisClient::getClient().refreshExpired(rate_key, 60);
+	
+	if(time > 5)
+	{
+	    auto* func = new std::function<void()>([sessPtr, requests_id](){
+		json j;
+		j["Requests_id"] = requests_id;
+		j["Type"] = "LoginResp";
+		j["Result"] = false;
+		j["FROM"] = "Email";
+		j["Info"] = "操作过于频繁，请60秒后重试";
+
+		std::string data = j.dump() + '\n';
+		bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv = {0,0};
+	    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void *arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	    }, func, &tv);
+
+	    return;
+	}
+	
 	std::string from;
 	std::string info;
 	bool is_login = false;
@@ -938,6 +968,34 @@ void ChatServerWorker::handleRegister(session* sess, std::string email, std::str
     auto sessPtr = sess->shared_from_this();
     ThreadPool::getThreadPool()->addTask([sessPtr, email = std::move(email), password = std::move(password), username = std::move(username), requests_id]()
     {
+	std::string rate_key = "rate:register:" + sessPtr->client_ip;
+	long long time = RedisClient::getClient().incr(rate_key);
+	if(time == 1)
+	    RedisClient::getClient().refreshExpired(rate_key, 60);
+	
+	if(time > 5)
+	{
+	    auto* func = new std::function<void()>([sessPtr, requests_id](){
+		json j;
+		j["Requests_id"] = requests_id;
+		j["Type"] = "RegisterResp";
+		j["Result"] = false;
+		j["FROM"] = "Email";
+		j["Info"] = "注册过于频繁，请60秒后重试";
+
+		std::string data = j.dump() + '\n';
+		bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	    });
+	    timeval tv = {0,0};
+	    event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void *arg){
+		auto* func = static_cast<std::function<void()>*>(arg);
+		(*func)();
+		delete func;
+	    }, func, &tv);
+
+	    return;
+	}
+
 	json j_Cache;
 	bool isCache = sessPtr->myself->tryGetCache(requests_id, j_Cache, sessPtr->clientSessionID.value());
 	bool is_success = false;

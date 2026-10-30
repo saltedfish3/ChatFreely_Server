@@ -36,6 +36,8 @@ struct session : public std::enable_shared_from_this<session>
    std::optional<std::string> clientSessionID;
    std::weak_ptr<session> weak_self;
 
+   std::string client_ip;
+
    std::queue<std::string> sendQueue;
    std::mutex mutex_sendQueue;
    std::atomic<bool> isQueueRunning = false;

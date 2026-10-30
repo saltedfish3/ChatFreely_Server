@@ -1,4 +1,5 @@
 #include "ChatServerListener.h"
+#include <event2/util.h>
 #include <filesystem>
 #include <sodium/randombytes.h>
 #include <sodium/utils.h>
@@ -98,8 +99,27 @@ void ChatServerListener::cb_listener(evconnlistener* listener,evutil_socket_t fd
 	logger.error("cb_listener pointer arg error:nullptr");
 	exit(1);
     }
+
+    std::string client_ip = "unknown";
+    if(addr != nullptr)
+    {
+	char ip_str[INET6_ADDRSTRLEN] = {0};
+	if(addr->sa_family == AF_INET)
+	{
+	    sockaddr_in* s = (sockaddr_in*)addr;
+	    evutil_inet_ntop(AF_INET, &s->sin_addr, ip_str, sizeof(ip_str));
+	    client_ip = ip_str;
+	}
+	else if(addr->sa_family == AF_INET6)
+	{
+	    sockaddr_in6* s = (sockaddr_in6*)addr;
+	    evutil_inet_ntop(AF_INET6, &s->sin6_addr, ip_str, sizeof(ip_str));
+	    client_ip = ip_str;
+	}
+    }
+
     csl->count = (csl->count + 1)%csl->list_worker.size();
-    csl->list_worker[csl->count]->addConnect(fd);
+    csl->list_worker[csl->count]->addConnect(fd, client_ip);
     logger.info("Client Connect");
 }
 
