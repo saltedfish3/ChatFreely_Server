@@ -33,19 +33,12 @@ struct session : public std::enable_shared_from_this<session>
    ChatServerWorker* myself;
    bufferevent* bev;
    std::optional<int64_t> uid;
+   std::optional<std::string> clientSessionID;
    std::weak_ptr<session> weak_self;
 
    std::queue<std::string> sendQueue;
    std::mutex mutex_sendQueue;
    std::atomic<bool> isQueueRunning = false;
-};
-
-struct userInfo {
-    std::string username;
-    std::string email;
-    std::string sid;
-    std::string avatar_url;
-    std::weak_ptr<session> sessPtr;
 };
 
 struct idempotentRecord
@@ -54,8 +47,9 @@ struct idempotentRecord
     std::chrono::steady_clock::time_point expiredTime;
 };
 
-extern std::shared_mutex mutex_onlineUser;
-extern std::unordered_map<int64_t, std::shared_ptr<userInfo>> onlineUser;
+extern std::string g_node_id;
+extern std::shared_mutex mutex_local_sessions;
+extern std::unordered_map<int64_t, std::weak_ptr<session>> local_sessions;
 extern std::string jwt_secret;
 class GlobalTools
 {

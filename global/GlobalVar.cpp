@@ -3,8 +3,9 @@
 
 std::atomic<bool> flag_shutdown = false;
 SnowflakeGen sfGen;
-std::shared_mutex mutex_onlineUser;
-std::unordered_map<int64_t, std::shared_ptr<userInfo>> onlineUser;
+std::string g_node_id = "node_1";
+std::shared_mutex mutex_local_sessions;
+std::unordered_map<int64_t, std::weak_ptr<session>> local_sessions;
 std::shared_mutex mutex_idempotentCache;
 std::unordered_map<std::string, idempotentRecord> idempotentCache;
 std::string jwt_secret;

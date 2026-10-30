@@ -31,6 +31,7 @@
 #include "../sql/SQLTransaction.h"
 #include "../sql/GuardConnect.h"
 #include "../logger/Logger.h"
+#include "../redis/RedisClient.h"
 
 class ChatServerWorker
 {
@@ -45,6 +46,14 @@ public:
     void addConnect(int fd);
 
 private:
+    struct UserInfo
+    {
+	std::string username;
+	std::string email;
+	std::string avatar_url;
+	std::string sid;
+    };
+
     event_base* base;
     std::thread myThread;
     
@@ -61,8 +70,8 @@ private:
 
     static void unPack(const char* line_json,session* sess);
 
-    static void handleHello(bufferevent* bev, const std::string requests_id);
-    static void handleHeartbeat(bufferevent* bev, const std::string requests_id);
+    static void handleHello(session* sess, const std::string clientSessionID, const std::string requests_id);
+    static void handleHeartbeat(session* sess, const std::string requests_id);
     static void handleLogin(session* sess, std::string email, std::string password, const std::string requests_id);
     static void handleAccessTokenLogin(session* sess, std::string accessToken, const std::string requests_id);
     static void handleRegister(session* sess, std::string email, std::string password, std::string username, const std::string requests_id);
@@ -142,8 +151,11 @@ private:
 
     static std::string createAccessToken(int64_t uid, const std::chrono::seconds& expire_duration = std::chrono::minutes(45));
     static std::pair<std::string, std::string> createRefreshToken();
-    void setCache(const std::string& requests_id, const json& responseJson, int seconds);
-    bool tryGetCache(const std::string& requests_id, json& outJson);
+
+    static bool getUserInfo(int64_t uid, UserInfo& outInfo);
+
+    void setCache(const std::string& requests_id, const json& responseJson, int seconds, const std::string& scope = "");
+    bool tryGetCache(const std::string& requests_id, json& outJson, const std::string& scope = "");
     void cleanExpiredCache();
 
     void handleSendQueueTask(std::shared_ptr<session> sessPtr);

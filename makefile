@@ -11,15 +11,17 @@ INCLUDES = -I. \
            -I./third_party \
 	   -I./thread \
 	   -I./logger \
-	   -I$(MINIO_ROOT)/include
+	   -I$(MINIO_ROOT)/include \
+	   -I./redis
 
 # 链接库
-LDFLAGS = -L$(MINIO_ROOT)/lib
+LDFLAGS = -L$(MINIO_ROOT)/lib -L/usr/local/lib
 
 # 链接库
 LIBS = -lminiocpp -lcurlpp -lINIReader -linih -lcurl \
        -lpugixml -lssl -lcrypto -lz \
        -levent -lmysqlclient -lpthread -lsodium -levent_pthreads \
+       -lredis++ -lhiredis \
        -ldl
 
 # 输出目录和目标
@@ -36,7 +38,8 @@ SRCS = ChatServer.cpp \
        sql/SQLTransaction.cpp \
        global/GlobalVar.cpp \
        thread/ThreadPool.cpp \
-       logger/Logger.cpp
+       logger/Logger.cpp \
+       redis/RedisClient.cpp
 
 # .cpp -> build/xxx.o
 OBJS = $(patsubst %.cpp, $(BUILD_DIR)/%.o, $(SRCS))
