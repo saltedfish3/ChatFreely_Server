@@ -4651,6 +4651,38 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 	int64_t nextSeq = 0;
 	int8_t conversationType = -1;
 
+	if(uidValid)
+	{
+	    int64_t sender_uid = sessPtr->uid.value();
+	    std::string rate_key = "rate:msg:" + std::to_string(sender_uid);
+	    long long msg_count = RedisClient::getClient().incr(rate_key);
+	    if(msg_count == 1)
+		RedisClient::getClient().refreshExpired(rate_key, 60);
+
+	    if(msg_count > 5)
+	    {
+		auto* func = new std::function<void()>([sessPtr, requests_id, tempmsgid, conversationID](){
+		    json j;
+		    j["Requests_id"] = requests_id;
+		    j["Type"] = "SendMessageResp";
+		    j["Result"] = false;
+		    j["Info"] = "发送过于频繁，请稍候再试";
+		    j["ConversationID"] = conversationID;
+		    j["TempMsgID"] = tempmsgid;
+
+		    std::string data = j.dump() + "\n";
+		    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+		});
+		timeval tv = {0, 0};
+		event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void *arg){
+		    auto* func = static_cast<std::function<void()>*>(arg);
+		    (*func)();
+		    delete func;
+		}, func, &tv);
+		return;
+	    }
+	}
+
 	std::string idempotentKey = conversationID + "_" + tempmsgid;
 	json j_Cache;
 	bool isCache = sessPtr->myself->tryGetCache(idempotentKey, j_Cache, sessPtr->clientSessionID.value());
