@@ -688,20 +688,69 @@ void ChatServerWorker::handleHello(session* sess, const std::string clientSessio
 void ChatServerWorker::handleHeartbeat(session* sess, const std::string requests_id)
 {
     auto sessPtr = sess->shared_from_this();
-    json j;
-    j["Requests_id"] = requests_id;
-    j["Type"] = "HeartbeatResp";
-    std::string data = j.dump() + '\n';
-    bufferevent_write(sessPtr->bev, data.c_str(), data.size());
 
-    if(sessPtr->uid.has_value())
+    if(!sessPtr->uid.has_value())
     {
-	int64_t uid = sessPtr->uid.value();
-	ThreadPool::getThreadPool()->addTask([uid](){
-	    std::string online_key = "online:uid:" + std::to_string(uid);
-	    RedisClient::getClient().refreshExpired(online_key, 90);
-	});
+	json j;
+	j["Requests_id"] = requests_id;
+	j["Type"] = "HeartbeatResp";
+	std::string data = j.dump() + '\n';
+	bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+	return;
     }
+
+    int64_t uid = sessPtr->uid.value();
+    ThreadPool::getThreadPool()->addTask([uid, sessPtr, requests_id](){
+	bool sessionValid = true;
+
+	{
+	    std::shared_ptr<session> currentSess;
+	    {
+		std::shared_lock lock(mutex_local_sessions);
+		auto it = local_sessions.find(uid);
+		if(it != local_sessions.end())
+		    currentSess = it->second.lock();
+	    }
+
+	    if(!currentSess || currentSess != sessPtr)
+		sessionValid = false;
+	}
+
+	if(sessionValid)
+	{
+	    std::string online_key = "online:uid:" + std::to_string(uid);
+	    auto node = RedisClient::getClient().get(online_key);
+	    if(!node.has_value() || node.value() != g_node_id)
+		sessionValid = false;
+	    else
+		RedisClient::getClient().refreshExpired(online_key, 90);
+	}
+
+	if(!sessionValid)
+	{
+	    {
+		std::lock_guard<std::shared_mutex> lock(mutex_local_sessions);
+		local_sessions.erase(uid);
+	    }
+	    sessPtr->uid.reset();
+	}
+	auto* func = new std::function<void()>([sessPtr, requests_id, sessionValid](){
+            json j;
+            j["Requests_id"] = requests_id;
+            j["Type"] = "HeartbeatResp";
+            if(!sessionValid)
+                j["SessionExpired"] = true;
+
+            std::string data = j.dump() + '\n';
+            bufferevent_write(sessPtr->bev, data.c_str(), data.size());
+        });
+        timeval tv = {0, 0};
+        event_base_once(sessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+            auto* func = static_cast<std::function<void()>*>(arg);
+            (*func)();
+            delete func;
+        }, func, &tv);
+    });
 }
 
 void ChatServerWorker::handleLogin(session* sess, std::string email, std::string password, const std::string requests_id)
@@ -722,7 +771,7 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 		j["Requests_id"] = requests_id;
 		j["Type"] = "LoginResp";
 		j["Result"] = false;
-		j["FROM"] = "Email";
+		j["From"] = "Email";
 		j["Info"] = "操作过于频繁，请60秒后重试";
 
 		std::string data = j.dump() + '\n';
@@ -826,8 +875,22 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 
 				if(old_node.has_value() && *old_node == g_node_id)
 				{
-				    RedisClient::getClient().del(online_key);
-				    lockSuccess = RedisClient::getClient().setIfNoExists(online_key, g_node_id, 90);
+				    bool hasActiveSession = false;
+				    {
+					std::shared_lock lock(mutex_local_sessions);
+					auto it = local_sessions.find(uid);
+					if(it != local_sessions.end())
+					{
+					    auto activeSess = it->second.lock();
+					    if(activeSess && activeSess->uid.has_value() && activeSess->uid.value() == uid)
+						hasActiveSession = true;
+					}
+				    }
+				    if(!hasActiveSession)
+				    {
+					RedisClient::getClient().del(online_key);
+					lockSuccess = RedisClient::getClient().setIfNoExists(online_key, g_node_id, 90);
+				    }
 				}
 			    }
 
@@ -980,7 +1043,7 @@ void ChatServerWorker::handleRegister(session* sess, std::string email, std::str
 		j["Requests_id"] = requests_id;
 		j["Type"] = "RegisterResp";
 		j["Result"] = false;
-		j["FROM"] = "Email";
+		j["From"] = "Email";
 		j["Info"] = "注册过于频繁，请60秒后重试";
 
 		std::string data = j.dump() + '\n';
@@ -1638,6 +1701,9 @@ void ChatServerWorker::handleDeleteFriendRequest(session* sess, std::string acce
 		    con->freeResult();
 		    sqlTrans.commit();
 		    result = true;
+
+		    RedisClient::getClient().del("friends:" + std::to_string(uid_token));
+		    RedisClient::getClient().del("friends:" + std::to_string(pushUID));
 		}
 	    }
 	}
@@ -2729,7 +2795,11 @@ void ChatServerWorker::handleHandleNewFriendRequest(session* sess, std::string h
 		    {
 			result = true;
 			if(isAgree)
+			{
+			    RedisClient::getClient().del("friends:" + std::to_string(uid_));
+			    RedisClient::getClient().del("friends:" + std::to_string(handle_uid_));
 			    pushNewFriend(sessPtr->uid.value(), handle_uid_);
+			}
 		    }
 		}
 	    }
@@ -3505,77 +3575,123 @@ void ChatServerWorker::handleGetFriendList(session* sess, std::string accessToke
 
 	if(uidValid)
 	{
-	    std::string sql = "SELECT friendships.id, user.id, user.snowid, user.username, user.email, user.avatar_url FROM friendships JOIN user ON user.snowid = friendships.user_a WHERE friendships.status = 1 AND friendships.user_b = ? UNION ALL SELECT friendships.id, user.id, user.snowid, user.username, user.email, user.avatar_url FROM friendships JOIN user ON user.snowid = friendships.user_b WHERE friendships.status = 1 AND friendships.user_a = ?;";
-	    int64_t uid = sessPtr->uid.value();
-	    MYSQL_BIND bind_param[2];
-	    initLongLongParam(&bind_param[0], &uid, sizeof(uid));
-	    initLongLongParam(&bind_param[1], &uid, sizeof(uid));
+	    int64_t my_uid = sessPtr->uid.value();
+	    std::string friends_key = "friends:" + std::to_string(my_uid);
 
-	    int64_t conversationID;
-	    int64_t user_sid;
-	    int64_t user_uid;
-	    char buf_username[64*4];
-	    char buf_email[128*4];
-	    char buf_avatar[512*4];
-	    MYSQL_BIND result_param[6];
-	    initLongLongParam(&result_param[0], &conversationID, sizeof(conversationID));
-	    initLongLongParam(&result_param[1], &user_sid, sizeof(user_sid));
-	    initLongLongParam(&result_param[2], &user_uid, sizeof(user_uid));
-	    unsigned long len_username = 0;
-	    initStringParam(&result_param[3], buf_username, sizeof(buf_username), &len_username);
-	    unsigned long len_email = 0;
-	    initStringParam(&result_param[4], buf_email, sizeof(buf_email), &len_email);
-	    unsigned long len_avatar = 0;
-	    initStringParam(&result_param[5], buf_avatar, sizeof(buf_avatar), &len_avatar);
-
-	    GuardConnection con(SQLPool::getSQLPool());
-	    if(con)
+	    json friends_relations = json::array();
+	    bool hasCache = false;
 	    {
-		con->executeSql(sql, bind_param, result_param);
-		int ret = 0;
-		std::vector<json> temp_items;
-		std::vector<std::string> online_keys;
-
-		while((ret = con->nextData()) == 1)
+		auto cache = RedisClient::getClient().get(friends_key);
+		if(cache.has_value() && !cache->empty())
 		{
-		    json item;
-		    item["ConversationID"] = std::to_string(conversationID);
-		    item["SID"] = std::to_string(user_sid);
-		    item["UID"] = std::to_string(user_uid);
-		    item["Username"] = std::string(buf_username, len_username);
-		    item["Email"] = std::string(buf_email, len_email);
-		    item["Avatar_Url"] = std::string(buf_avatar, len_avatar);
-		    len_username = 0;
-		    len_email = 0;
-		    len_avatar = 0;
-
-		    temp_items.push_back(item);
-		    online_keys.emplace_back("online:uid:" + std::to_string(user_uid));
-		}
-		if(ret != 0)
-		    logger.warn("获取好友列表错误");
-		else
-		{
-		    if(!temp_items.empty())
+		    try
 		    {
-			auto online_results = RedisClient::getClient().mget(online_keys);
-
-			for(size_t i = 0; i < temp_items.size(); i++)
-			{
-			    bool isOnline = false;
-			    if(i < online_results.size() && online_results[i].has_value())
-				isOnline = true;
-
-			    temp_items[i]["IsOnline"] = isOnline;
-			    arr.push_back(temp_items[i]);
-			}
-			result = true;
+			friends_relations = json::parse(cache.value());
+			hasCache = true;
+		    }catch(const std::exception& e)
+		    {
+			logger.warn("handleGetFriendList Parse Json Failed:" + friends_key);
 		    }
 		}
 	    }
-	    else
+
+	    if(!hasCache)
 	    {
-		logger.error("获取数据库连接失败");
+		std::string sql = "SELECT friendships.id, user.id, user.snowid FROM friendships JOIN user ON user.snowid = friendships.user_a WHERE friendships.status = 1 AND friendships.user_b = ? UNION ALL SELECT friendships.id, user.id, user.snowid FROM friendships JOIN user ON user.snowid = friendships.user_b WHERE friendships.status = 1 AND friendships.user_a = ?;";
+		int64_t uid = sessPtr->uid.value();
+		MYSQL_BIND bind_param[2];
+		initLongLongParam(&bind_param[0], &uid, sizeof(uid));
+		initLongLongParam(&bind_param[1], &uid, sizeof(uid));
+
+		int64_t conversationID;
+		int64_t user_sid;
+		int64_t user_uid;
+		MYSQL_BIND result_param[3];
+		initLongLongParam(&result_param[0], &conversationID, sizeof(conversationID));
+		initLongLongParam(&result_param[1], &user_sid, sizeof(user_sid));
+		initLongLongParam(&result_param[2], &user_uid, sizeof(user_uid));
+		
+		GuardConnection con(SQLPool::getSQLPool());
+		if(con)
+		{	
+		    con->executeSql(sql, bind_param, result_param);
+		    int ret = 0;
+
+		    while((ret = con->nextData()) == 1)
+		    {
+			json item;
+			item["ConversationID"] = std::to_string(conversationID);
+			item["SID"] = std::to_string(user_sid);
+			item["UID"] = std::to_string(user_uid);
+
+			friends_relations.push_back(item);
+		    }
+		    if(ret != 0)
+			logger.warn("获取好友列表错误");
+		    else
+		    {
+			RedisClient::getClient().setWithExpired(friends_key, friends_relations.dump(), 600);
+			hasCache = true;
+		    }
+		}
+		else
+		{
+		    logger.error("获取数据库连接失败");
+		}
+	    }
+
+	    if(hasCache)
+	    {
+		std::vector<std::string> user_info_keys;
+		std::vector<std::string> online_keys;
+
+		for(const auto& rela : friends_relations)
+		{
+		    std::string friend_uid = rela["UID"].get<std::string>();
+		    user_info_keys.emplace_back("user_info:" + friend_uid);
+		    online_keys.emplace_back("online:uid:" + friend_uid);
+		}
+
+		auto info_results = RedisClient::getClient().mget(user_info_keys);
+		auto online_results = RedisClient::getClient().mget(online_keys);
+
+		for(size_t i = 0; i < friends_relations.size(); i++)
+		{
+		    json item = friends_relations[i];
+
+		    if(i < info_results.size() && info_results[i].has_value())
+		    {
+			try
+			{
+			    json info = json::parse(info_results[i].value());
+			    item["Username"] = info.value("username", "");
+			    item["Email"] = info.value("email", "");
+			    item["Avatar_Url"] = info.value("avatar_url", "");
+			    
+			}catch(const std::exception& e)
+			{
+			    logger.warn("handleGetFriendList Parse Json Error");
+			}
+		    }
+		    else
+		    {
+			UserInfo info;
+			if(getUserInfo(std::stoll(item["UID"].get<std::string>()), info))
+			{
+			    item["Username"] = info.username;
+			    item["Email"] = info.email;
+			    item["Avatar_Url"] = info.avatar_url;
+			}
+		    }
+
+		    bool isOnline = false;
+		    if(i < online_results.size() && online_results[i].has_value())
+			isOnline = true;
+
+		    item["IsOnline"] = isOnline;
+		    arr.push_back(item);
+		}
+		result = true;
 	    }
 	}
 	auto* func = new std::function<void()>([result, sessPtr, requests_id, arr, uidValid](){
@@ -3911,8 +4027,6 @@ void ChatServerWorker::handleRefreshToken(session* sess, std::string refreshToke
 	    if(result)
 	    {
 		j["AccessToken"] = accessToken;
-		if(!sessPtr->uid.has_value())
-		    sessPtr->uid = uid;
 	    }
 	    else
 	    {
@@ -4651,13 +4765,17 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 	int64_t nextSeq = 0;
 	int8_t conversationType = -1;
 
-	if(uidValid)
+	std::string idempotentKey = conversationID + "_" + tempmsgid;
+	json j_Cache;
+	bool isCache = sessPtr->myself->tryGetCache(idempotentKey, j_Cache, sessPtr->clientSessionID.value());
+
+	if(!isCache && uidValid)
 	{
 	    int64_t sender_uid = sessPtr->uid.value();
 	    std::string rate_key = "rate:msg:" + std::to_string(sender_uid);
 	    long long msg_count = RedisClient::getClient().incr(rate_key);
 	    if(msg_count == 1)
-		RedisClient::getClient().refreshExpired(rate_key, 60);
+		RedisClient::getClient().refreshExpired(rate_key, 1);
 
 	    if(msg_count > 5)
 	    {
@@ -4682,10 +4800,6 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 		return;
 	    }
 	}
-
-	std::string idempotentKey = conversationID + "_" + tempmsgid;
-	json j_Cache;
-	bool isCache = sessPtr->myself->tryGetCache(idempotentKey, j_Cache, sessPtr->clientSessionID.value());
 
 	if(!isCache && uidValid && isSnowID(conversationID))
 	{
@@ -4809,7 +4923,8 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 			std::string truncContent = content.size() > 10000 ? content.substr(0, 10000) : content;
 			
 			SQLTransaction sqlTrans(con->getMysql());
-
+			
+			bool isDuplicate = false;
 			bool ok = [&]() -> bool{
 			    {
 				std::string sql_insert = "INSERT IGNORE INTO conversation_seq(conversation_id, conversation_type, last_conv_seq) VALUES(?, ?, 0);";
@@ -4889,12 +5004,12 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 				    {
 					logger.warn("upsert conversations affected error");
 					return false;
-				    }
+			    }
 				}
 			    }
 
 			    {
-				std::string sql = "INSERT INTO messages(snowid, conversation_id, conv_seq, sender_id, type, content, idempotent_key, timestamp) VALUES(?, ?, ?, ?, ?, ?, ?, ?);";
+				std::string sql = "INSERT IGNORE INTO messages(snowid, conversation_id, conv_seq, sender_id, type, content, idempotent_key, timestamp) VALUES(?, ?, ?, ?, ?, ?, ?, ?);";
 				timestamp = ((id >> 22) + 1704067200000LL) / 1000; 
 
 				MYSQL_BIND bind_param[8];
@@ -4917,13 +5032,53 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 				}
 				
 				my_ulonglong rows = con->getAffectRows();
-				if(rows == 0 || rows >= (my_ulonglong)-2)
+				if(rows == 1)
+				{
+				    nextSeq = convSeq;
+				}
+				else if(rows == 0)
+				{
+				    std::string sql_sel = "SELECT snowid, conv_seq, sender_id, timestamp FROM messages WHERE idempotent_key = ? LIMIT 1 FOR UPDATE;";
+				    MYSQL_BIND bind_sel;
+				    unsigned long len_idempotent_sel = idempotentKey.size();
+				    initStringParam(&bind_sel, (char*)idempotentKey.data(), idempotentKey.size(), &len_idempotent_sel);
+
+				    int64_t exist_snowid = 0;
+				    int64_t exist_convSeq = 0;
+				    int64_t exist_sender = 0;
+				    int64_t exist_timestamp = 0;
+
+				    MYSQL_BIND result_sel[4];
+				    initLongLongParam(&result_sel[0], &exist_snowid, sizeof(exist_snowid));
+				    initLongLongParam(&result_sel[1], &exist_convSeq, sizeof(exist_convSeq));
+				    initLongLongParam(&result_sel[2], &exist_sender, sizeof(exist_sender));
+				    initLongLongParam(&result_sel[3], &exist_timestamp, sizeof(exist_timestamp));
+
+				    if(!con->executeSql(sql_sel, &bind_sel, result_sel) || con->nextData() <= 0)
+				    {
+					logger.warn("SendMessage Idempotent reSelect failed");
+					return false;
+				    }
+
+				    if(exist_sender != senderUID)
+				    {
+					logger.warn("SendMessage idempotent_key collision with other sender");
+					con->freeResult();
+					return false;
+				    }
+				    con->freeResult();
+
+				    id = exist_snowid;
+				    nextSeq = exist_convSeq;
+				    timestamp = exist_timestamp;
+
+				    isDuplicate = true;
+				}
+				else
 				{
 				    logger.warn("SendMessage INSERT messages affected 0 rows");
 				    return false;
 				}
-
-				nextSeq = convSeq;
 			    }
 			    return true;
 			}();
@@ -4931,11 +5086,16 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 			if(ok)
 			{
 			    con->freeResult();
-			    sqlTrans.commit();
-			    result = true;
-
-			    for(int64_t receiverUID : pushMembers)
-				pushNewMessage(conversationID_int, senderUID, receiverUID, id, timestamp, contentType, truncContent, nextSeq);
+			    
+			    if(isDuplicate)
+				result = true;
+			    else
+			    {
+				sqlTrans.commit();
+				result = true;
+				for(int64_t receiverUID : pushMembers)
+				    pushNewMessage(conversationID_int, senderUID, receiverUID, id, timestamp, contentType, truncContent, nextSeq);
+			    }
 			}
 			else
 			{
