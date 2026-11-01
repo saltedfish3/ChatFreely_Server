@@ -1478,6 +1478,7 @@ void ChatServerWorker::handleUpdateGroupNameRequest(session* sess, std::string a
 		    con->freeResult();
 		    sqlTrans.commit();
 		    result = true;
+		    RedisClient::getClient().del("group_info:" + conversationID);
 		}
 	    }
 	}
@@ -1580,6 +1581,7 @@ void ChatServerWorker::handleUpdateGroupAvatarRequest(session* sess, std::string
 		    con->freeResult();
 		    sqlTrans.commit();
 		    result = true;
+		    RedisClient::getClient().del("group_info:" + conversationID);
 		}
 	    }
 	}
@@ -1853,6 +1855,7 @@ void ChatServerWorker::handleExitGroupRequest(session* sess, std::string accessT
 		    con->freeResult();
 		    sqlTrans.commit();
 		    result = true;
+		    RedisClient::getClient().del("group_members:" + conversationID);
 		}
 	    }
 	}
@@ -2024,6 +2027,8 @@ void ChatServerWorker::handleDismissGroupRequest(session* sess, std::string acce
 		    con->freeResult();
 		    sqlTrans.commit();
 		    result = true;
+		    RedisClient::getClient().del("group_info:" + conversationID);
+		    RedisClient::getClient().del("group_members:" + conversationID);
 		}
 	    }
 	}
@@ -2992,6 +2997,9 @@ void ChatServerWorker::handleHandleNewGroupJoinRequest(session* sess, std::strin
 		    if(!alreadyHandled)
 			sqlTrans.commit();
 		    result = true;
+
+		    if(!alreadyHandled && isAgree)
+			RedisClient::getClient().del("group_members:" + std::to_string(conversationID));
 		}
 	    }
 	}
@@ -3225,6 +3233,7 @@ void ChatServerWorker::handleRemoveGroupMemberRequest(session* sess, std::string
 			con->freeResult();
 			sqlTrans.commit();
 			result = true;
+			RedisClient::getClient().del("group_members:" + conversationID);
 		    }
 		}
 	    }
@@ -3882,79 +3891,162 @@ void ChatServerWorker::handleGetGroupInfo(session* sess, std::string accessToken
 	int64_t uid_token = GlobalTools::verifyAccessToken(accessToken);
 	bool uidValid = sessPtr->uid.has_value() && uid_token != -1 && sessPtr->uid.value() == uid_token;
 	bool result = false;
-	json arr = json::array();
 	json groupInfo;
 
 	if(uidValid && isSnowID(conversationID))
 	{
 	    int64_t conversationID_int = std::stoll(conversationID);
-	    GuardConnection con(SQLPool::getSQLPool());
-	    if(con)
+	    std::string uidStr = std::to_string(uid_token);
+	    std::string membersKey = "group_members:" + conversationID;
+	    std::string infoKey = "group_info:" + conversationID;
+
+	    bool infoHit = false;
 	    {
-		std::string sql = "SELECT g.name, g.avatar_url, g.owner_uid, g.id FROM chat_groups g JOIN group_members gm ON gm.conversation_id = g.snowid WHERE g.snowid = ? AND gm.uid = ? AND gm.status = 0 AND g.status = 0;";
-
-		MYSQL_BIND bind_param[2];
-		initLongLongParam(&bind_param[0], &conversationID_int, sizeof(conversationID_int));
-		initLongLongParam(&bind_param[1], &uid_token, sizeof(uid_token));
-
-		char buf_groupName[64 * 4];
-		unsigned long len_groupName = 0;
-		char buf_avatarUrl[512 * 4];
-		unsigned long len_avatarUrl = 0;
-		int64_t owner_uid = 0;
-		int64_t group_id = 0;
-
-		MYSQL_BIND result_param[4];
-		initStringParam(&result_param[0], buf_groupName, sizeof(buf_groupName), &len_groupName);
-		initStringParam(&result_param[1], buf_avatarUrl, sizeof(buf_avatarUrl), &len_avatarUrl);
-		initLongLongParam(&result_param[2], &owner_uid, sizeof(owner_uid));
-		initLongLongParam(&result_param[3], &group_id, sizeof(group_id));
-
-		if(con->executeSql(sql, bind_param, result_param) && con->nextData() > 0)
+		auto cache = RedisClient::getClient().get(infoKey);
+		if(cache.has_value())
 		{
-		    groupInfo["ConversationID"] = conversationID;
-		    groupInfo["GroupName"] = std::string(buf_groupName, len_groupName);
-		    groupInfo["Avatar_Url"] = std::string(buf_avatarUrl, len_avatarUrl);
-		    groupInfo["OwnerUID"] = std::to_string(owner_uid);
-		    groupInfo["GroupID"] = std::to_string(group_id);
-
-		    std::string sql_members = "SELECT u.id, u.snowid, u.username, u.avatar_url FROM user u JOIN group_members gm ON gm.uid = u.snowid WHERE gm.conversation_id = ? AND gm.status = 0 AND u.status = 0;";
-
-		    MYSQL_BIND bind_param_m;
-		    initLongLongParam(&bind_param_m, &conversationID_int, sizeof(conversationID_int));
-
-		    int64_t sid = 0;
-		    int64_t uid = 0;
-		    char buf_username[64 * 4];
-		    unsigned long len_username = 0;
-		    char buf_avatarUrl_member[512 * 4];
-		    unsigned long len_avatarUrl_member = 0;
-
-		    MYSQL_BIND result_param_m[4];
-		    initLongLongParam(&result_param_m[0], &sid, sizeof(sid));
-		    initLongLongParam(&result_param_m[1], &uid, sizeof(uid));
-		    initStringParam(&result_param_m[2], buf_username, sizeof(buf_username), &len_username);
-		    initStringParam(&result_param_m[3], buf_avatarUrl_member, sizeof(buf_avatarUrl_member), &len_avatarUrl_member);
-
-		    con->freeResult();
-		    if(con->executeSql(sql_members, &bind_param_m, result_param_m))
+		    try
 		    {
-			while(con->nextData() > 0)
-			{
-			    json member;
-			    member["SID"] = std::to_string(sid);
-			    member["UID"] = std::to_string(uid);
-			    member["Username"] = std::string(buf_username, len_username);
-			    member["AvatarUrl"] = std::string(buf_avatarUrl_member, len_avatarUrl_member);
-			    arr.push_back(member);
-			    
-			    len_username = 0;
-			    len_avatarUrl_member = 0;
-			}
-			groupInfo["MemberInfos"] = arr;
-			result = true;
+			groupInfo = json::parse(cache.value());
+			infoHit = true;
+		    }catch(const std::exception& e)
+		    {
+			groupInfo = json();
 		    }
 		}
+	    }
+	    
+	    if(!infoHit)
+	    {
+		GuardConnection con(SQLPool::getSQLPool());
+		if(con)
+		{
+		    std::string sql = "SELECT name, avatar_url, owner_uid, id FROM chat_groups WHERE snowid = ? AND status = 0;";
+
+		    MYSQL_BIND bind_param;
+		    initLongLongParam(&bind_param, &conversationID_int, sizeof(conversationID_int));
+
+		    char buf_groupName[64 * 4];
+		    unsigned long len_groupName = 0;
+		    char buf_avatarUrl[512 * 4];
+		    unsigned long len_avatarUrl = 0;
+		    int64_t owner_uid = 0;
+		    int64_t group_id = 0;
+
+		    MYSQL_BIND result_param[4];
+		    initStringParam(&result_param[0], buf_groupName, sizeof(buf_groupName), &len_groupName);
+		    initStringParam(&result_param[1], buf_avatarUrl, sizeof(buf_avatarUrl), &len_avatarUrl);
+		    initLongLongParam(&result_param[2], &owner_uid, sizeof(owner_uid));
+		    initLongLongParam(&result_param[3], &group_id, sizeof(group_id));
+
+		    if(con->executeSql(sql, &bind_param, result_param) && con->nextData() > 0)
+		    {
+			groupInfo["ConversationID"] = conversationID;
+			groupInfo["GroupName"] = std::string(buf_groupName, len_groupName);
+			groupInfo["Avatar_Url"] = std::string(buf_avatarUrl, len_avatarUrl);
+			groupInfo["OwnerUID"] = std::to_string(owner_uid);
+			groupInfo["GroupID"] = std::to_string(group_id);
+			RedisClient::getClient().setWithExpired(infoKey, groupInfo.dump(), 300);
+		    }
+		}
+	    }
+	    
+	    if(!groupInfo.empty())
+	    {
+		std::vector<std::string> memberUIDs;
+		bool membersHit = false;
+		{
+		    auto cache = RedisClient::getClient().get(membersKey);
+		    if(cache.has_value())
+		    {
+			try
+			{
+			    json arr = json::parse(cache.value());
+			    for(const auto& member : arr)
+			    {
+				if(member.is_string())
+				    memberUIDs.push_back(member.get<std::string>());
+			    }
+			    membersHit = true;
+			}catch(const std::exception& e)
+			{
+			    memberUIDs.clear();
+			}
+		    }
+		}
+
+		if(!membersHit)
+		{
+		    GuardConnection con(SQLPool::getSQLPool());
+		    if(con)
+		    {
+			std::string sql_members = "SELECT uid FROM group_members WHERE conversation_id = ? AND status = 0;";
+
+			MYSQL_BIND bind_param;
+			initLongLongParam(&bind_param, &conversationID_int, sizeof(conversationID_int));
+
+			int64_t uid = 0;
+			MYSQL_BIND result_param;
+			initLongLongParam(&result_param, &uid, sizeof(uid));
+
+			if(con->executeSql(sql_members, &bind_param, &result_param))
+			{
+			    json arr = json::array();
+			    while(con->nextData() > 0)
+			    {
+				memberUIDs.push_back(std::to_string(uid));
+				arr.push_back(std::to_string(uid));
+			    }
+			    con->freeResult();
+			    RedisClient::getClient().setWithExpired(membersKey, arr.dump(), 300);
+			}
+		    }
+		}
+
+		std::vector<std::string> infoKeys;
+		infoKeys.reserve(memberUIDs.size());
+		for(const auto& uid : memberUIDs)
+		    infoKeys.emplace_back("user_info:" + uid);
+
+		auto info_results = RedisClient::getClient().mget(infoKeys);
+		json memberInfos = json::array();
+		for(size_t i = 0; i < memberUIDs.size(); i++)
+		{
+		    const std::string& uid = memberUIDs[i];
+		    json item;
+		    item["UID"] = uid;
+
+		    bool filled = false;
+		    if(i < info_results.size() && info_results[i].has_value())
+		    {
+			try
+			{
+			    json info = json::parse(info_results[i].value());
+			    item["SID"] = info.value("sid", "");
+			    item["Username"] = info.value("username", "");
+			    item["AvatarUrl"] = info.value("avatar_url", "");
+			    filled = true;
+			}catch(const std::exception& e)
+			{}
+		    }
+
+		    if(!filled)
+		    {
+			UserInfo info;
+			if(getUserInfo(std::stoll(uid), info))
+			{
+			    item["SID"] = info.sid;
+			    item["Username"] = info.username;
+			    item["AvatarUrl"] = info.avatar_url;
+			}
+			else
+			    continue;
+		    }
+		    memberInfos.push_back(item);
+		}
+
+		groupInfo["MemberInfos"] = memberInfos;
+		result = true;
 	    }
 	}
 	auto* func = new std::function<void()>([result, sessPtr, requests_id, groupInfo, uidValid, conversationID](){
@@ -4885,18 +4977,47 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 		    }
 		    else
 		    {
-			std::string sql = "SELECT uid FROM group_members WHERE conversation_id = ? AND status = 0;";
-			MYSQL_BIND bind_param;
-			initLongLongParam(&bind_param, &conversationID_int, sizeof(conversationID_int));
+			std::string membersKey = "group_members:" + conversationID;
+			bool membersHit = false;
+			auto cache = RedisClient::getClient().get(membersKey);
 
-			int64_t memberUID = 0;
-			MYSQL_BIND result_param;
-			initLongLongParam(&result_param, &memberUID, sizeof(memberUID));
+			if(cache.has_value())
+			{
+			    try
+			    {
+				json arr = json::parse(cache.value());
+				for(const auto& uid : arr)
+				{
+				    if(uid.is_string())
+					members.push_back(std::stoll(uid.get<std::string>()));
+				}
+				membersHit = true;
+			    }catch(const std::exception& e)
+			    {
+				members.clear();
+			    }
+			}
 
-			con->executeSql(sql, &bind_param, &result_param);
-			while(con->nextData() > 0)
-			    members.push_back(memberUID);
+			if(!membersHit)
+			{
+			    std::string sql = "SELECT uid FROM group_members WHERE conversation_id = ? AND status = 0;";
+			    MYSQL_BIND bind_param;
+			    initLongLongParam(&bind_param, &conversationID_int, sizeof(conversationID_int));
 
+			    int64_t memberUID = 0;
+			    MYSQL_BIND result_param;
+			    initLongLongParam(&result_param, &memberUID, sizeof(memberUID));
+
+			    con->executeSql(sql, &bind_param, &result_param);
+
+			    json arr = json::array();
+			    while(con->nextData() > 0)
+			    {
+				members.push_back(memberUID);
+				arr.push_back(std::to_string(memberUID));
+			    }
+			    RedisClient::getClient().setWithExpired(membersKey, arr.dump(), 300);
+			}
 			for(int64_t uid : members)
 			{
 			    if(uid == senderUID)
@@ -4914,7 +5035,7 @@ void ChatServerWorker::handleSendMessage(session* sess, std::string accessToken,
 			    {
 				if(uid != senderUID)
 				    pushMembers.push_back(uid);
-			    }
+			    }   
 			}
 		    }
 
