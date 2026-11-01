@@ -137,6 +137,8 @@ private:
 
     static void pushRemoveGroupMember(int64_t pushUID, int64_t conversationID);
 
+    static void pushToUser(int64_t uid, const std::string& content);
+
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);
     static bool isSID(const std::string& sid);

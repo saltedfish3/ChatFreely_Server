@@ -4305,25 +4305,16 @@ void ChatServerWorker::pushNewFriendRequests(int64_t sendUID, int64_t pushUID, c
 
     if(pushSessPtr)
     {
-	auto* func = new std::function<void()>([pushSessPtr, sendUID, verMsg, username, avatar_url, SID](){
-	    json j;
-	    j["Requests_id"] = "125433701";
-	    j["Type"] = "PushNewFriendRequests";
-	    j["SID"] = SID; 
-	    j["UID"] = std::to_string(sendUID);
-	    j["Username"] = username;
-	    j["Avatar_Url"] = avatar_url;
-	    j["VerMsg"] = verMsg; 
-	    std::string data = j.dump() + "\n";
-	    
-	    bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-	    });
-	    timeval tv{0, 0};
-	    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-		auto* func = static_cast<std::function<void()>*>(arg);
-		(*func)();
-		delete func;
-	}, func, &tv);
+	json j;
+	j["Requests_id"] = "125433701";
+	j["Type"] = "PushNewFriendRequests";
+	j["SID"] = SID; 
+	j["UID"] = std::to_string(sendUID);
+	j["Username"] = username;
+	j["Avatar_Url"] = avatar_url;
+	j["VerMsg"] = verMsg; 
+	
+	pushToUser(pushUID, j.dump() + "\n"); 
     }
 }
 
@@ -4411,54 +4402,34 @@ void ChatServerWorker::pushNewFriend(int64_t sendUID, int64_t pushUID)
 
     if(pushSessPtr)
     {
-	auto* func = new std::function<void()>([pushSessPtr, sendUID, sendInfo, friendshipID_str, sendOnline](){
-	    json j;
-	    j["Requests_id"] = "125433702";
-	    j["Type"] = "PushNewFriend";
-	    j["ConversationID"] = friendshipID_str;
-	    j["SID"] = sendInfo.sid; 
-	    j["UID"] = std::to_string(sendUID);
-	    j["Username"] = sendInfo.username;
-	    j["Avatar_Url"] = sendInfo.avatar_url;
-	    j["Email"] = sendInfo.email;
-	    j["IsOnline"] = sendOnline;
+	json j;
+	j["Requests_id"] = "125433702";
+	j["Type"] = "PushNewFriend";
+	j["ConversationID"] = friendshipID_str;
+	j["SID"] = sendInfo.sid; 
+	j["UID"] = std::to_string(sendUID);
+	j["Username"] = sendInfo.username;
+	j["Avatar_Url"] = sendInfo.avatar_url;
+	j["Email"] = sendInfo.email;
+	j["IsOnline"] = sendOnline;
 	     
-	    std::string data = j.dump() + "\n";
-	    
-	    bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-	    });
-	    timeval tv{0, 0};
-	    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-		auto* func = static_cast<std::function<void()>*>(arg);
-		(*func)();
-		delete func;
-	}, func, &tv);
+	pushToUser(pushUID, j.dump() + "\n");
     }
 
     if(sendSessPtr)
     {
-	auto* func = new std::function<void()>([sendSessPtr, pushUID, pushInfo, pushOnline, friendshipID_str](){
-	    json j;
-	    j["Requests_id"] = "125433702";
-	    j["Type"] = "PushNewFriend";
-	    j["ConversationID"] = friendshipID_str;
-	    j["SID"] = pushInfo.sid; 
-	    j["UID"] = std::to_string(pushUID);
-	    j["Username"] = pushInfo.username;
-	    j["Avatar_Url"] = pushInfo.avatar_url;
-	    j["Email"] = pushInfo.email;
-	    j["IsOnline"] = pushOnline;
+	json j;
+	j["Requests_id"] = "125433702";
+	j["Type"] = "PushNewFriend";
+	j["ConversationID"] = friendshipID_str;
+	j["SID"] = pushInfo.sid; 
+	j["UID"] = std::to_string(pushUID);
+	j["Username"] = pushInfo.username;
+	j["Avatar_Url"] = pushInfo.avatar_url;
+	j["Email"] = pushInfo.email;
+	j["IsOnline"] = pushOnline;
 	     
-	    std::string data = j.dump() + "\n";
-	    
-	    bufferevent_write(sendSessPtr->bev, data.c_str(), data.size());
-	    });
-	    timeval tv{0, 0};
-	    event_base_once(sendSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-		auto* func = static_cast<std::function<void()>*>(arg);
-		(*func)();
-		delete func;
-	}, func, &tv);
+	pushToUser(sendUID, j.dump() + "\n");
     }
 }
 
@@ -4476,27 +4447,17 @@ void ChatServerWorker::pushNewGroup(int64_t pushUID, const std::string& conversa
     if(!pushSessPtr)
 	return;
 
-    auto* func = new std::function<void()>([groupName, groupID, conversationID, memberInfos_arr, avatarUrl, ownerUID, pushSessPtr](){
-	json j;
-	j["Requests_id"] = "125433708";
-	j["Type"] = "PushNewGroup";
-	j["ConversationID"] = conversationID;
-	j["OwnerUID"] = ownerUID;
-	j["GroupID"] = groupID;
-	j["GroupName"] = groupName;
-	j["Avatar_Url"] = avatarUrl;
-	j["MemberInfos"] = memberInfos_arr;    
+    json j;
+    j["Requests_id"] = "125433708";
+    j["Type"] = "PushNewGroup";
+    j["ConversationID"] = conversationID;
+    j["OwnerUID"] = ownerUID;
+    j["GroupID"] = groupID;
+    j["GroupName"] = groupName;
+    j["Avatar_Url"] = avatarUrl;
+    j["MemberInfos"] = memberInfos_arr;    
 
-	std::string data = j.dump() + "\n";
-	    
-	bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-    });
-    timeval tv{0, 0};
-    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-	auto* func = static_cast<std::function<void()>*>(arg);
-	(*func)();
-	delete func;
-    }, func, &tv);
+    pushToUser(pushUID, j.dump() + "\n");
 }
 
 void ChatServerWorker::pushFriendStatus(int64_t changeUID, bool isOnline)
@@ -4529,34 +4490,13 @@ void ChatServerWorker::pushFriendStatus(int64_t changeUID, bool isOnline)
 	int ret = 0;
 	while((ret = con->nextData()) == 1)
 	{
-	    std::shared_ptr<session> pushSessPtr;
-	    {
-		std::shared_lock lock(mutex_local_sessions);
-		auto it_push = local_sessions.find(pushUID);
-		if(it_push != local_sessions.end())
-		    pushSessPtr = it_push->second.lock();
-	    }
-
-	    if(pushSessPtr)
-	    {
-		auto* func = new std::function<void()>([changeUID, isOnline, pushSessPtr](){
-		    json j;
-		    j["Requests_id"] = "125433703";
-		    j["Type"] = "PushFriendStatus";
-		    j["UID"] = std::to_string(changeUID);
-		    j["IsOnline"] = isOnline;
+	    json j;
+	    j["Requests_id"] = "125433703";
+	    j["Type"] = "PushFriendStatus";
+	    j["UID"] = std::to_string(changeUID);
+	    j["IsOnline"] = isOnline;
 	     
-		    std::string data = j.dump() + "\n";
-		    bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-		});
-		
-		timeval tv{0, 0};
-		event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-		    auto* func = static_cast<std::function<void()>*>(arg);
-		    (*func)();
-		    delete func;
-		}, func, &tv);
-	    }
+	    pushToUser(pushUID, j.dump() + "\n");
 	}
 	if(ret < 0)
 	    logger.warn("PushFriendStatus Select DB Error");
@@ -4593,23 +4533,13 @@ void ChatServerWorker::pushFriendUsername(int64_t changeUID, const std::string& 
 		std::shared_ptr<session> pushSessPtr = it_push->second.lock();
 		if(pushSessPtr)
 		{
-		    auto* func = new std::function<void()>([changeUID, username, pushSessPtr](){
 		    json j;
 		    j["Requests_id"] = "125433705";
 		    j["Type"] = "PushFriendUsername";
 		    j["UID"] = std::to_string(changeUID);
 		    j["Username"] = username;
 	     
-		    std::string data = j.dump() + "\n";
-		    bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-		    });
-		
-		    timeval tv{0, 0};
-		    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-			auto* func = static_cast<std::function<void()>*>(arg);
-			(*func)();
-			delete func;
-		    }, func, &tv);
+		    pushToUser(pushUID, j.dump() + "\n");
 		}
 	    }
 	}
@@ -4648,23 +4578,13 @@ void ChatServerWorker::pushFriendAvatar(int64_t changeUID, const std::string& av
 		std::shared_ptr<session> pushSessPtr = it_push->second.lock();
 		if(pushSessPtr)
 		{
-		    auto* func = new std::function<void()>([changeUID, avatar, pushSessPtr](){
 		    json j;
 		    j["Requests_id"] = "125433706";
 		    j["Type"] = "PushFriendAvatar";
 		    j["UID"] = std::to_string(changeUID);
 		    j["Avatar"] = avatar;
 	     
-		    std::string data = j.dump() + "\n";
-		    bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-		    });
-		
-		    timeval tv{0, 0};
-		    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-			auto* func = static_cast<std::function<void()>*>(arg);
-			(*func)();
-			delete func;
-		    }, func, &tv);
+		    pushToUser(pushUID, j.dump() + "\n");
 		}
 	    }
 	}
@@ -4675,79 +4595,37 @@ void ChatServerWorker::pushFriendAvatar(int64_t changeUID, const std::string& av
 
 void ChatServerWorker::pushNewMessage(int64_t conversationID, int64_t sendUID, int64_t pushUID, int64_t messageID, int64_t timestamp, int8_t contentType, const std::string& content, int64_t convSeq)
 {
-    std::shared_ptr<session> pushSessPtr;
-    {
-	std::shared_lock lock(mutex_local_sessions);
-	auto it = local_sessions.find(pushUID);
-	if(it == local_sessions.end())
-	    return;
-	pushSessPtr = it->second.lock();
-    }
-    if(pushSessPtr)
-    {
-	auto* func = new std::function<void()>([sendUID, messageID, timestamp, content, pushSessPtr, convSeq, contentType, conversationID](){
-	    json j;
-	    j["Requests_id"] = "125433704";
-	    j["Type"] = "PushNewMessage";
-	    j["ConversationID"] = std::to_string(conversationID);
-	    j["SenderUID"] = std::to_string(sendUID);
-	    j["MessageID"] = std::to_string(messageID);
-	    j["ContentType"] = std::to_string(contentType);
-	    j["Content"] = content;
-	    j["TimeStamp"] = std::to_string(timestamp);
-	    j["ConvSeq"] = std::to_string(convSeq);
-	     
-	    std::string data = j.dump() + "\n";
+    json j;
+    j["Requests_id"] = "125433704";
+    j["Type"] = "PushNewMessage";
+    j["ConversationID"] = std::to_string(conversationID);
+    j["SenderUID"] = std::to_string(sendUID);
+    j["MessageID"] = std::to_string(messageID);
+    j["ContentType"] = std::to_string(contentType);
+    j["Content"] = content;
+    j["TimeStamp"] = std::to_string(timestamp);
+    j["ConvSeq"] = std::to_string(convSeq);
 	    
-	    bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-	    });
-	    timeval tv{0, 0};
-	    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-		auto* func = static_cast<std::function<void()>*>(arg);
-		(*func)();
-		delete func;
-	}, func, &tv);
-    }
+    pushToUser(pushUID, j.dump() + "\n");
 }
 
 void ChatServerWorker::pushGroupJoinRequest(int64_t pushUID, int64_t requestID, const std::string& groupName, int8_t source, const std::string& displayAvatarUrl, const std::string& displayName, int64_t sid, const std::string& inviterName, const std::string& verMsg)
 {
-    std::shared_ptr<session> pushSessPtr;
-    {
-	std::shared_lock lock(mutex_local_sessions);
-	auto it = local_sessions.find(pushUID);
-	if(it == local_sessions.end())
-	    return;
-	pushSessPtr = it->second.lock();
-    }
-    if(!pushSessPtr)
-	return;
-
-    auto* func = new std::function<void()>([requestID, pushSessPtr, displayAvatarUrl, displayName, source, groupName, verMsg, sid, inviterName](){
-	json j;
-	j["Requests_id"] = "125433707";
-	j["Type"] = "PushGroupJoinRequest";
-	j["RequestID"] = std::to_string(requestID);
-	j["GroupName"] = groupName;
-	j["Source"] = std::to_string(source);
-	j["DisplayName"] = displayName;
-	j["DisplayAvatarUrl"] = displayAvatarUrl;
-	j["VerMsg"] = verMsg;
-	if(source == 0)
-	    j["InviterName"] = inviterName;
-	else
-	    j["ApplicantSID"] = std::to_string(sid);
+    json j;
+    j["Requests_id"] = "125433707";
+    j["Type"] = "PushGroupJoinRequest";
+    j["RequestID"] = std::to_string(requestID);
+    j["GroupName"] = groupName;
+    j["Source"] = std::to_string(source);
+    j["DisplayName"] = displayName;
+    j["DisplayAvatarUrl"] = displayAvatarUrl;
+    j["VerMsg"] = verMsg;
+    if(source == 0)
+	j["InviterName"] = inviterName;
+    else
+	j["ApplicantSID"] = std::to_string(sid);
 	     
-	std::string data = j.dump() + "\n";
-		
-	bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-    });
-    timeval tv{0, 0};
-    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-	auto* func = static_cast<std::function<void()>*>(arg);
-	(*func)();
-	delete func;
-    }, func, &tv);
+    pushToUser(pushUID, j.dump() + "\n");
 }
 
 void ChatServerWorker::pushFriendDeleted(int64_t pushUID, int64_t conversationID)
@@ -4763,77 +4641,49 @@ void ChatServerWorker::pushFriendDeleted(int64_t pushUID, int64_t conversationID
     if(!pushSessPtr)
 	return;
 
-    auto* func = new std::function<void()>([pushSessPtr, conversationID](){
-	json j;
-	j["Requests_id"] = "125433709";
-	j["Type"] = "PushFriendDeleted";
-	j["ConversationID"] = std::to_string(conversationID);
+    json j;
+    j["Requests_id"] = "125433709";
+    j["Type"] = "PushFriendDeleted";
+    j["ConversationID"] = std::to_string(conversationID);
 
-	std::string data = j.dump() + "\n";
-		
-	bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-    });
-    timeval tv{0, 0};
-    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-	auto* func = static_cast<std::function<void()>*>(arg);
-	(*func)();
-	delete func;
-    }, func, &tv);
+    pushToUser(pushUID, j.dump() + "\n");
 }
 
 void ChatServerWorker::pushGroupDismiss(int64_t pushUID, int64_t conversationID)
 {
-    std::shared_ptr<session> pushSessPtr;
-    {
-	std::shared_lock lock(mutex_local_sessions);
-	auto it = local_sessions.find(pushUID);
-	if(it == local_sessions.end())
-	    return;
-	pushSessPtr = it->second.lock();
-    }
-    if(!pushSessPtr)
-	return;
+    json j;
+    j["Requests_id"] = "125433710";
+    j["Type"] = "PushGroupDismiss";
+    j["ConversationID"] = std::to_string(conversationID);
 
-    auto* func = new std::function<void()>([pushSessPtr, conversationID](){
-	json j;
-	j["Requests_id"] = "125433710";
-	j["Type"] = "PushGroupDismiss";
-	j["ConversationID"] = std::to_string(conversationID);
-
-	std::string data = j.dump() + "\n";
-		
-	bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
-    });
-    timeval tv{0, 0};
-    event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
-	auto* func = static_cast<std::function<void()>*>(arg);
-	(*func)();
-	delete func;
-    }, func, &tv);
+    pushToUser(pushUID, j.dump() + "\n");
 }
 
 void ChatServerWorker::pushRemoveGroupMember(int64_t pushUID, int64_t conversationID)
 {
+    json j;
+    j["Requests_id"] = "125433711";
+    j["Type"] = "PushRemoveGroupMember";
+    j["ConversationID"] = std::to_string(conversationID);
+
+    pushToUser(pushUID, j.dump() + "\n");
+}
+
+void ChatServerWorker::pushToUser(int64_t uid, const std::string& content)
+{
     std::shared_ptr<session> pushSessPtr;
     {
 	std::shared_lock lock(mutex_local_sessions);
-	auto it = local_sessions.find(pushUID);
-	if(it == local_sessions.end())
-	    return;
-	pushSessPtr = it->second.lock();
+	auto it = local_sessions.find(uid);
+	if(it != local_sessions.end())
+	    pushSessPtr = it->second.lock();
     }
+
     if(!pushSessPtr)
 	return;
 
-    auto* func = new std::function<void()>([pushSessPtr, conversationID](){
-	json j;
-	j["Requests_id"] = "125433711";
-	j["Type"] = "PushRemoveGroupMember";
-	j["ConversationID"] = std::to_string(conversationID);
-
-	std::string data = j.dump() + "\n";
-		
-	bufferevent_write(pushSessPtr->bev, data.c_str(), data.size());
+    auto* func = new std::function<void()>([pushSessPtr, content](){
+	bufferevent_write(pushSessPtr->bev, content.c_str(), content.size());
     });
     timeval tv{0, 0};
     event_base_once(pushSessPtr->myself->base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
