@@ -47,7 +47,21 @@ ChatServerWorker::ChatServerWorker()
 
     try
     {
-	RedisClient::getClient().init("127.0.0.1", 6379, "PLM6123304PLM", 4);	
+	RedisClient::getClient().init("127.0.0.1", 6379, "PLM6123304PLM", 4);
+	RedisClient::getClient().startSubscriber();
+	this->subscriberHandlerID = RedisClient::getClient().addHandler([this](int64_t uid, const std::string& content){
+	    std::shared_ptr<session> sessPtr;
+	    {
+		std::shared_lock lock(mutex_local_sessions);
+		auto it = local_sessions.find(uid);
+		if(it != local_sessions.end())
+		    sessPtr = it->second.lock();
+	    }
+
+	    if(!sessPtr || sessPtr->myself != this)
+		return;
+	    pushToLocalUser(uid, content);
+	});
     }catch(const std::exception& e)
     {
 	logger.warn("Redis Init Failed");
@@ -56,6 +70,9 @@ ChatServerWorker::ChatServerWorker()
 
 ChatServerWorker::~ChatServerWorker()
 {
+    if(this->subscriberHandlerID != 0)
+	RedisClient::getClient().removeHandler(this->subscriberHandlerID);
+
     this->stop();
     if(this->base)
     {
@@ -723,7 +740,7 @@ void ChatServerWorker::handleHeartbeat(session* sess, const std::string requests
 	    if(!node.has_value() || node.value() != g_node_id)
 		sessionValid = false;
 	    else
-		RedisClient::getClient().refreshExpired(online_key, 90);
+		RedisClient::getClient().refreshExpired(online_key, 180);
 	}
 
 	if(!sessionValid)
@@ -867,7 +884,7 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 			if(verify_password(password, stored_password))
 			{
 			    std::string online_key = "online:uid:" + std::to_string(uid);
-			    bool lockSuccess = RedisClient::getClient().setIfNoExists(online_key, g_node_id, 90);
+			    bool lockSuccess = RedisClient::getClient().setIfNoExists(online_key, g_node_id, 180);
 
 			    if(!lockSuccess)
 			    {
@@ -889,7 +906,7 @@ void ChatServerWorker::handleLogin(session* sess, std::string email, std::string
 				    if(!hasActiveSession)
 				    {
 					RedisClient::getClient().del(online_key);
-					lockSuccess = RedisClient::getClient().setIfNoExists(online_key, g_node_id, 90);
+					lockSuccess = RedisClient::getClient().setIfNoExists(online_key, g_node_id, 180);
 				    }
 				}
 			    }
@@ -4183,7 +4200,7 @@ void ChatServerWorker::handleAccessTokenLogin(session* sess, std::string accessT
 		if(con->nextData() > 0)
 		{
 		    std::string online_key = "online:uid:" + std::to_string(uid);
-		    if(!RedisClient::getClient().setIfNoExists(online_key, g_node_id, 90))
+		    if(!RedisClient::getClient().setIfNoExists(online_key, g_node_id, 180))
 			result = false;
 		    else
 		    {
@@ -4245,15 +4262,6 @@ void ChatServerWorker::handleAccessTokenLogin(session* sess, std::string accessT
 
 void ChatServerWorker::pushNewFriendRequests(int64_t sendUID, int64_t pushUID, const std::string& verMsg)
 {
-    std::shared_ptr<session> pushSessPtr;
-    {
-	std::shared_lock lock(mutex_local_sessions);
-	auto it_push = local_sessions.find(pushUID);
-	if(it_push == local_sessions.end())
-	    return;
-	pushSessPtr = it_push->second.lock();
-    }
-    
     std::string SID;
     std::string username;
     std::string avatar_url;
@@ -4303,77 +4311,25 @@ void ChatServerWorker::pushNewFriendRequests(int64_t sendUID, int64_t pushUID, c
 	SID = std::to_string(sid);
     }
 
-    if(pushSessPtr)
-    {
-	json j;
-	j["Requests_id"] = "125433701";
-	j["Type"] = "PushNewFriendRequests";
-	j["SID"] = SID; 
-	j["UID"] = std::to_string(sendUID);
-	j["Username"] = username;
-	j["Avatar_Url"] = avatar_url;
-	j["VerMsg"] = verMsg; 
+    json j;
+    j["Requests_id"] = "125433701";
+    j["Type"] = "PushNewFriendRequests";
+    j["SID"] = SID; 
+    j["UID"] = std::to_string(sendUID);
+    j["Username"] = username;
+    j["Avatar_Url"] = avatar_url;
+    j["VerMsg"] = verMsg; 
 	
-	pushToUser(pushUID, j.dump() + "\n"); 
-    }
+    pushToUser(pushUID, j.dump() + "\n"); 
 }
 
 void ChatServerWorker::pushNewFriend(int64_t sendUID, int64_t pushUID)
 {
-    std::shared_ptr<session> sendSessPtr;
-    std::shared_ptr<session> pushSessPtr;
-    bool sendOnline = false;
-    bool pushOnline = false;
-    {
-	std::shared_lock lock(mutex_local_sessions);
-	auto it_push = local_sessions.find(pushUID);
-	auto it_send = local_sessions.find(sendUID);
-	
-	if(it_push != local_sessions.end())
-	{
-	    pushSessPtr = it_push->second.lock();
-	    if(pushSessPtr)
-		pushOnline = true;
-	}
-	if(it_send != local_sessions.end())
-	{
-	    sendSessPtr = it_send->second.lock();
-	    if(sendSessPtr)
-		sendOnline = true;
-	}
-    }
+    bool sendOnline = RedisClient::getClient().get("online:uid:" + std::to_string(sendUID)).has_value();
 
-    if(!sendOnline)
-	sendOnline = RedisClient::getClient().get("online:uid:" + std::to_string(sendUID)).has_value();
+    bool pushOnline = RedisClient::getClient().get("online:uid:" + std::to_string(pushUID)).has_value();
 
-    if(!pushOnline)
-	pushOnline = RedisClient::getClient().get("online:uid:" + std::to_string(pushUID)).has_value();
-
-    if(!sendSessPtr && !pushSessPtr)
-	return;
-
-    UserInfo sendInfo;
-    bool hasSendInfo = false;
-    UserInfo pushInfo;
-    bool hasPushInfo = false;
-
-    if(sendSessPtr)
-	hasSendInfo = getUserInfo(sendUID, sendInfo);
-    if(pushSessPtr)
-	hasPushInfo = getUserInfo(pushUID, pushInfo);
-
-    if(pushSessPtr && !hasPushInfo)
-    {
-	logger.warn("PushNewFriend No Info Pass:" + std::to_string(pushUID));
-	pushSessPtr = nullptr;
-    }
-    if(sendSessPtr && !hasSendInfo)
-    {
-	logger.warn("PushNewFriend No Info Pass:" + std::to_string(sendUID));
-	sendSessPtr = nullptr;
-    }
-
-    if(!sendSessPtr && !pushSessPtr)
+    if(!sendOnline && !pushOnline)
 	return;
 
     int64_t friendshipID = 0;
@@ -4400,53 +4356,53 @@ void ChatServerWorker::pushNewFriend(int64_t sendUID, int64_t pushUID)
 
     std::string friendshipID_str = std::to_string(friendshipID);
 
-    if(pushSessPtr)
+    if(pushOnline)
     {
-	json j;
-	j["Requests_id"] = "125433702";
-	j["Type"] = "PushNewFriend";
-	j["ConversationID"] = friendshipID_str;
-	j["SID"] = sendInfo.sid; 
-	j["UID"] = std::to_string(sendUID);
-	j["Username"] = sendInfo.username;
-	j["Avatar_Url"] = sendInfo.avatar_url;
-	j["Email"] = sendInfo.email;
-	j["IsOnline"] = sendOnline;
+	UserInfo sendInfo;
+	if(getUserInfo(sendUID, sendInfo))
+	{
+	    json j;
+	    j["Requests_id"] = "125433702";
+	    j["Type"] = "PushNewFriend";
+	    j["ConversationID"] = friendshipID_str;
+	    j["SID"] = sendInfo.sid; 
+	    j["UID"] = std::to_string(sendUID);
+	    j["Username"] = sendInfo.username;
+	    j["Avatar_Url"] = sendInfo.avatar_url;
+	    j["Email"] = sendInfo.email;
+	    j["IsOnline"] = sendOnline;
 	     
-	pushToUser(pushUID, j.dump() + "\n");
+	    pushToUser(pushUID, j.dump() + "\n");
+	}
+	else
+            logger.warn("PushNewFriend No Info sendUID:" + std::to_string(sendUID));
     }
 
-    if(sendSessPtr)
+    if(sendOnline)
     {
-	json j;
-	j["Requests_id"] = "125433702";
-	j["Type"] = "PushNewFriend";
-	j["ConversationID"] = friendshipID_str;
-	j["SID"] = pushInfo.sid; 
-	j["UID"] = std::to_string(pushUID);
-	j["Username"] = pushInfo.username;
-	j["Avatar_Url"] = pushInfo.avatar_url;
-	j["Email"] = pushInfo.email;
-	j["IsOnline"] = pushOnline;
+	UserInfo pushInfo;
+	if(getUserInfo(pushUID, pushInfo))
+	{
+	    json j;
+	    j["Requests_id"] = "125433702";
+	    j["Type"] = "PushNewFriend";
+	    j["ConversationID"] = friendshipID_str;
+	    j["SID"] = pushInfo.sid; 
+	    j["UID"] = std::to_string(pushUID);
+	    j["Username"] = pushInfo.username;
+	    j["Avatar_Url"] = pushInfo.avatar_url;
+	    j["Email"] = pushInfo.email;
+	    j["IsOnline"] = pushOnline;
 	     
-	pushToUser(sendUID, j.dump() + "\n");
+	    pushToUser(sendUID, j.dump() + "\n");
+	}
+	else
+            logger.warn("PushNewFriend No Info pushUID:" + std::to_string(pushUID));
     }
 }
 
 void ChatServerWorker::pushNewGroup(int64_t pushUID, const std::string& conversationID, const std::string& groupID, const std::string& groupName, const std::string& avatarUrl, const std::string& ownerUID, json memberInfos_arr)
 {
-    std::shared_ptr<session> pushSessPtr;
-    {
-	std::shared_lock lock(mutex_local_sessions);
-	auto it_push = local_sessions.find(pushUID);
-	if(it_push == local_sessions.end())
-	    return;
-	pushSessPtr = it_push->second.lock();
-    }
-
-    if(!pushSessPtr)
-	return;
-
     json j;
     j["Requests_id"] = "125433708";
     j["Type"] = "PushNewGroup";
@@ -4526,22 +4482,13 @@ void ChatServerWorker::pushFriendUsername(int64_t changeUID, const std::string& 
 	int ret = 0;
 	while((ret = con->nextData()) == 1)
 	{
-	    std::shared_lock lock(mutex_local_sessions);
-	    auto it_push = local_sessions.find(pushUID);
-	    if(it_push != local_sessions.end())
-	    {
-		std::shared_ptr<session> pushSessPtr = it_push->second.lock();
-		if(pushSessPtr)
-		{
-		    json j;
-		    j["Requests_id"] = "125433705";
-		    j["Type"] = "PushFriendUsername";
-		    j["UID"] = std::to_string(changeUID);
-		    j["Username"] = username;
+	    json j;
+	    j["Requests_id"] = "125433705";
+	    j["Type"] = "PushFriendUsername";
+	    j["UID"] = std::to_string(changeUID);
+	    j["Username"] = username;
 	     
-		    pushToUser(pushUID, j.dump() + "\n");
-		}
-	    }
+	    pushToUser(pushUID, j.dump() + "\n");
 	}
 	if(ret < 0)
 	    logger.warn("PushFriendUsername Select DB Error");
@@ -4571,22 +4518,13 @@ void ChatServerWorker::pushFriendAvatar(int64_t changeUID, const std::string& av
 	int ret = 0;
 	while((ret = con->nextData()) == 1)
 	{
-	    std::shared_lock lock(mutex_local_sessions);
-	    auto it_push = local_sessions.find(pushUID);
-	    if(it_push != local_sessions.end())
-	    {
-		std::shared_ptr<session> pushSessPtr = it_push->second.lock();
-		if(pushSessPtr)
-		{
-		    json j;
-		    j["Requests_id"] = "125433706";
-		    j["Type"] = "PushFriendAvatar";
-		    j["UID"] = std::to_string(changeUID);
-		    j["Avatar"] = avatar;
+	    json j;
+	    j["Requests_id"] = "125433706";
+	    j["Type"] = "PushFriendAvatar";
+	    j["UID"] = std::to_string(changeUID);
+	    j["Avatar"] = avatar;
 	     
-		    pushToUser(pushUID, j.dump() + "\n");
-		}
-	    }
+	    pushToUser(pushUID, j.dump() + "\n");
 	}
 	if(ret < 0)
 	    logger.warn("PushFriendAvatar Select DB Error");
@@ -4630,17 +4568,6 @@ void ChatServerWorker::pushGroupJoinRequest(int64_t pushUID, int64_t requestID, 
 
 void ChatServerWorker::pushFriendDeleted(int64_t pushUID, int64_t conversationID)
 {
-    std::shared_ptr<session> pushSessPtr;
-    {
-	std::shared_lock lock(mutex_local_sessions);
-	auto it = local_sessions.find(pushUID);
-	if(it == local_sessions.end())
-	    return;
-	pushSessPtr = it->second.lock();
-    }
-    if(!pushSessPtr)
-	return;
-
     json j;
     j["Requests_id"] = "125433709";
     j["Type"] = "PushFriendDeleted";
@@ -4670,6 +4597,33 @@ void ChatServerWorker::pushRemoveGroupMember(int64_t pushUID, int64_t conversati
 }
 
 void ChatServerWorker::pushToUser(int64_t uid, const std::string& content)
+{
+    std::shared_ptr<session> pushSessPtr;
+    {
+	std::shared_lock lock(mutex_local_sessions);
+	auto it = local_sessions.find(uid);
+	if(it != local_sessions.end())
+	    pushSessPtr = it->second.lock();
+    }
+
+    if(pushSessPtr)
+    {
+	pushToLocalUser(uid, content);
+	return;
+    }
+    
+    auto node = RedisClient::getClient().get("online:uid:" + std::to_string(uid));
+    if(!node.has_value() || node->empty())
+	return;
+
+    if(node.value() == g_node_id)
+	return;
+
+    std::string msg = std::to_string(uid) + "\n" + content;
+    RedisClient::getClient().publish("channel:node:" + node.value(), msg);
+}
+
+void ChatServerWorker::pushToLocalUser(int64_t uid, const std::string& content)
 {
     std::shared_ptr<session> pushSessPtr;
     {

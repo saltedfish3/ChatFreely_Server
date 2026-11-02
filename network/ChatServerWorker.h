@@ -62,6 +62,8 @@ private:
     std::shared_mutex mutex_idempotentCache;
     std::unordered_map<std::string, idempotentRecord> idempotentCache;
 
+    uint64_t subscriberHandlerID = 0;
+
     void listen();
         
     static void cb_read(bufferevent* bev, void* arg);
@@ -138,6 +140,7 @@ private:
     static void pushRemoveGroupMember(int64_t pushUID, int64_t conversationID);
 
     static void pushToUser(int64_t uid, const std::string& content);
+    static void pushToLocalUser(int64_t uid, const std::string& content);
 
     static bool isEmail(const std::string& email);
     static bool isPassword(const std::string& password);

@@ -1,11 +1,17 @@
 #include "RedisClient.h"
+#include "GlobalVar.h"
 #include <chrono>
+#include <exception>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <sw/redis++/command_options.h>
+#include <sw/redis++/errors.h>
+#include <thread>
+#include <utility>
 #include <vector>
 
 Logger RedisClient::logger("RedisClient");
@@ -18,6 +24,11 @@ RedisClient& RedisClient::getClient()
 
 RedisClient::RedisClient()
 {}
+
+RedisClient::~RedisClient()
+{
+    stopSubscriber();
+}
 
 void RedisClient::init(const std::string& host, int port, const std::string& password, int poolSize)
 {
@@ -122,8 +133,7 @@ bool RedisClient::publish(const std::string& channel, const std::string& message
 
     try
     {
-	this->redis->publish(channel, message);
-	return true;
+	return this->redis->publish(channel, message) > 0;
     }catch(const sw::redis::Error&)
     {
 	return false;
@@ -159,4 +169,116 @@ long long RedisClient::incr(const std::string& key)
     {
 	return 0;
     }
+}
+
+void RedisClient::startSubscriber()
+{
+    std::lock_guard<std::mutex> lock(this->mutex_subscribe);
+    if(thread_subscribe.joinable())
+	return;
+
+    subscribeStop.store(false);
+    std::string channel = "channel:node:" + g_node_id;
+
+    thread_subscribe = std::thread([this, channel](){
+	while(!subscribeStop.load())
+	{
+	    try
+	    {
+		ConnectionOptions opts;
+		opts.host = "127.0.0.1";
+		opts.port = 6379;
+		opts.password = "PLM6123304PLM";
+		opts.socket_timeout = std::chrono::milliseconds(1000);
+
+		auto redisSub = sw::redis::Redis(opts);
+		auto sub = redisSub.subscriber();
+
+		sub.on_message([this](std::string, std::string msg){
+		    auto pos = msg.find('\n');
+		    if(pos == std::string::npos)
+			return;
+		    
+		    int64_t uid = 0;
+		    try
+		    {
+			uid = std::stoll(msg.substr(0, pos));
+		    }
+		    catch(const std::exception& e)
+		    {
+			logger.warn("Subscribe handle msg failed: stoll failed[" + msg.substr(0, pos) + "]");
+			return;
+		    }
+
+		    std::string content = msg.substr(pos + 1);
+
+		    std::vector<std::function<void(int64_t uid, const std::string& content)>> snapshot;
+		    {
+			std::lock_guard<std::mutex> lock(this->mutex_handler);
+			snapshot.reserve(this->map_handlers.size());
+			for(auto& item : this->map_handlers)
+			    snapshot.push_back(item.second);
+		    }
+		    
+		    for(auto& handler : snapshot)
+		    {
+			try
+			{
+			    handler(uid, content);
+			}catch(const std::exception& e)
+			{
+			    logger.warn(std::string("Execute subscriber callback failed:") + e.what());
+			}
+		    }
+		});
+
+		sub.subscribe(channel);
+
+		while(!subscribeStop.load())
+		{
+		    try
+		    {
+			sub.consume();
+		    }catch(const sw::redis::TimeoutError&)
+		    {}
+
+		}
+		sub.unsubscribe();
+	    }catch(const std::exception& e)
+	    {
+		if(subscribeStop.load())
+		    break;
+		std::this_thread::sleep_for(std::chrono::seconds(2));
+	    }
+	}
+    });
+}
+
+void RedisClient::stopSubscriber()
+{
+    std::thread temp;
+    {
+	std::lock_guard<std::mutex> lock(this->mutex_subscribe);
+	subscribeStop.store(true);
+	temp = std::move(this->thread_subscribe);
+    }
+
+    if(temp.joinable())
+	temp.join();
+
+    std::lock_guard<std::mutex> lock(this->mutex_handler);
+    this->map_handlers.clear();
+}
+
+uint64_t RedisClient::addHandler(std::function<void(int64_t uid, const std::string& content)> callback)
+{
+    std::lock_guard<std::mutex> lock(this->mutex_handler);
+    this->map_handlers.emplace(this->nextHandlerID, std::move(callback));
+    return this->nextHandlerID++;
+}
+
+void RedisClient::removeHandler(uint64_t handlerID)
+{
+    std::lock_guard<std::mutex> lock(this->mutex_handler);
+    this->map_handlers.erase(handlerID);
 }
