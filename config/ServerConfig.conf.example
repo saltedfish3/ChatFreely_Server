@@ -1,0 +1,47 @@
+# ========== Server ==========
+node_id = node_1
+listen_port = 9002
+upload_port = 9003
+worker_num = 4
+upload_worker_num = 2
+jwt_secret_file = ./secret/jwt_secret.key
+
+# ========== ThreadPool ==========
+thread_pool_size = 8
+
+# ========== Redis ==========
+redis_host = 127.0.0.1
+redis_port = 6379
+redis_password = 
+redis_pool_size = 4
+
+# ========== Mysql ==========
+mysql_host = 127.0.0.1
+mysql_port = 3306
+mysql_username = root
+mysql_password = 
+mysql_dbname = ChatFreely
+mysql_min_connection = 3
+mysql_max_connection = 10
+mysql_min_alive_minutes = 60
+mysql_max_alive_minutes = 240
+mysql_min_free_minutes = 20
+mysql_max_free_minutes = 40
+
+# ========= Minio ==========
+minio_endpoint = http://127.0.0.1:9000
+minio_access_key = minioadmin
+minio_secret_key = minioadmin
+minio_region = us-east-1
+minio_bucket = chat
+
+# ========== Public Access ==========
+public_url_prefix = http://127.0.0.1/bucket/
+upload_public_host = 127.0.0.1:9003
+
+# ========== Timeouts ==========
+mysql_connect_timeout = 3
+redis_connect_timeout = 1000
+redis_socket_timeout = 1000
+http_connect_timeout = 2
+http_total_timeout = 5
