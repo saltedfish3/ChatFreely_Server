@@ -3,3 +3,7 @@ build/
 .cache/
 
 *.swp
+
+makefile
+
+compile_commands.json

@@ -44,7 +44,7 @@ std::string g_minio_secret_key = "minioadmin";
 std::string g_minio_region = "us-east-1";
 std::string g_minio_bucket = "chat";
 
-std::string g_public_url_prefix = "http://127.0.0.1/chat/";
+std::string g_public_url_prefix = "http://127.0.0.1/bucket/";
 std::string g_upload_public_host = "127.0.0.1:9003";
 
 int g_mysql_connect_timeout = 3;

@@ -1,9 +1,14 @@
 #include "curl/curl.h"
+#include "miniocpp/args.h"
+#include "miniocpp/client.h"
+#include "miniocpp/providers.h"
+#include "miniocpp/request.h"
 #include "network/ChatServerListener.h"
 #include "global/GlobalVar.h"
 #include "redis/RedisClient.h"
 #include <arpa/inet.h>
 #include <asm-generic/socket.h>
+#include <cctype>
 #include <cerrno>
 #include <exception>
 #include <fcntl.h>
@@ -11,6 +16,7 @@
 #include <fstream>
 #include <ios>
 #include <iostream>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sodium/randombytes.h>
 #include <sodium/utils.h>
@@ -20,6 +26,13 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+
+struct HostPort
+{
+    std::string host;
+    int port = 0;
+    bool https = false;
+};
 
 Logger logger("main");
 
@@ -57,56 +70,142 @@ static void generateJwtSecret(const std::string& filePath)
     logger.info("JWT secret generated: " + filePath);
 }
 
-static bool checkTcpPort(const std::string& ip, int port, int timeout_sec)
+static bool checkTcpPort(const std::string& host, int port, int timeout_sec)
 {
-    sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = inet_addr(ip.c_str());
+    addrinfo info;
+    info.ai_family = AF_UNSPEC;
+    info.ai_socktype = SOCK_STREAM;
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if(sock < 0)
+    addrinfo* res = nullptr;
+    std::string portStr = std::to_string(port);
+    if(getaddrinfo(host.c_str(), portStr.c_str(), &info, &res) != 0 || !res)
 	return false;
 
-    int flag = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flag | O_NONBLOCK);
-
-    int res = connect(sock, (sockaddr*)&addr, sizeof(addr));
-    if(res < 0 && errno == EINPROGRESS)
+    bool ok = false;
+    for(addrinfo* p = res; p != nullptr; p = p->ai_next)
     {
-	fd_set fdset;
-	FD_ZERO(&fdset);
-	FD_SET(sock, &fdset);
+	int sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+	if(sock < 0)
+	    continue;
 
-	timeval tv;
-	tv.tv_sec = timeout_sec;
-	tv.tv_usec = 0;
+	int flag = fcntl(sock, F_GETFL, 0);
+	fcntl(sock, F_SETFL, flag | O_NONBLOCK);
 
-	res = select(sock + 1, NULL, &fdset, NULL, &tv);
-	if(res <= 0)
+	int r = connect(sock, p->ai_addr, p->ai_addrlen);
+	if(r < 0 && errno == EINPROGRESS)
 	{
-	    close(sock);
-	    return false;
-	}
-	else
-	{
-	    int so_error;
-	    socklen_t len = sizeof(so_error);
-	    getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
-	    if(so_error != 0)
+	    fd_set fdset;
+	    FD_ZERO(&fdset);
+	    FD_SET(sock, &fdset);
+
+	    timeval tv;
+	    tv.tv_sec = timeout_sec;
+	    tv.tv_usec = 0;
+
+	    r = select(sock + 1, NULL, &fdset, NULL, &tv);
+	    if(r > 0)
 	    {
-		close(sock);
-		return false;
+		int so_error;
+		socklen_t len = sizeof(so_error);
+		getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+		if(so_error == 0)
+		    ok = true;
 	    }
 	}
-    }
-    else if(res < 0)
-    {
+	else if(r == 0)
+	    ok = true;
+
 	close(sock);
+    }
+
+    freeaddrinfo(res);
+    return ok;
+}
+
+static HostPort parseUrlToHostPort(const std::string& url, int defaultPort = 0)
+{
+    HostPort hp;
+    std::string url_copy = url;
+
+    size_t pos_pre = url_copy.find("://");
+    if(pos_pre != std::string::npos)
+    {
+	std::string preStr = url_copy.substr(0, pos_pre);
+	for(char& c : preStr)
+	    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+	hp.https = (preStr == "https");
+	url_copy = url_copy.substr(pos_pre + 3);
+    }
+
+    size_t pos_path = url_copy.find('/');
+    if(pos_path != std::string::npos)
+	url_copy = url_copy.substr(0, pos_path);
+
+    size_t pos_at = url_copy.find('@');
+    if(pos_at != std::string::npos)
+	url_copy = url_copy.substr(pos_at + 1);
+
+    if(!url_copy.empty() && url_copy.front() == '[')
+    {
+	size_t end = url_copy.find(']');
+	if(end != std::string::npos)
+	{
+	    hp.host = url_copy.substr(1, end - 1);
+	    if(end + 1 < url_copy.size() && url_copy[end + 1] == ':')
+		hp.port = std::stoi(url_copy.substr(end + 2));
+	}
+    }
+    else
+    {
+	size_t pos_colon = url_copy.find(':');
+	if(pos_colon != std::string::npos && url_copy.find(':') == pos_colon)
+	{
+	    hp.host = url_copy.substr(0, pos_colon);
+	    hp.port = std::stoi(url_copy.substr(pos_colon + 1));
+	}
+	else
+	    hp.host = url_copy;
+    }
+
+    if(hp.port == 0)
+	hp.port = defaultPort > 0 ? defaultPort : (hp.https ? 443 : 80);
+
+    return hp;
+}
+
+static bool checkMinioReady(const std::string& endpoint, const std::string& accessKey, const std::string& secretKey, const std::string& bucket, std::string& outErrMsg)
+{
+    try
+    {
+	minio::s3::BaseUrl BaseUrl(endpoint);
+	minio::creds::StaticProvider provider(accessKey, secretKey);
+	minio::s3::Client client(BaseUrl, &provider);
+
+	minio::s3::BucketExistsArgs args;
+	args.bucket = bucket;
+
+	auto resp = client.BucketExists(args);
+
+	std::string errStr = resp.Error().String();
+	if(!errStr.empty())
+	{
+	    outErrMsg = errStr;
+	    return false;
+	}
+
+	if(!resp)
+	{
+	    outErrMsg = "bucket not exists: " + bucket;
+	    return false;
+	}
+	
+	return true;
+    }catch(const std::exception& e)
+    {
+	outErrMsg = e.what();
 	return false;
     }
-    close(sock);
-    return true;
 }
 
 int main(int argc, char* argv[])
@@ -165,6 +264,34 @@ int main(int argc, char* argv[])
     if(!checkTcpPort(g_redis_host, g_redis_port, g_redis_connect_timeout / 1000))
     {
 	logger.error("Start failed: Redis (" + g_redis_host + ":" + std::to_string(g_redis_port) + ") is unreachable");
+	return 1;
+    }
+
+    try
+    {
+	if(g_minio_endpoint.empty())
+	{
+	    logger.error("Start failed: minio_endpoint is empty");
+	    return 1;
+	}
+
+	HostPort hp = parseUrlToHostPort(g_minio_endpoint);
+
+	if(!checkTcpPort(hp.host, hp.port, g_http_connect_timeout))
+	{
+	    logger.error("Start failed: MinIO (" + hp.host + ":" + std::to_string(hp.port) + ")");
+	    return 1;
+	}
+
+	std::string err;
+	if(!checkMinioReady(g_minio_endpoint, g_minio_access_key, g_minio_secret_key, g_minio_bucket, err))
+	{
+	    logger.error("Start failed: MinIO check failed (" + g_minio_endpoint + ", bucket = " + g_minio_bucket + "):" + err);
+	    return 1;
+	}
+    }catch(const std::exception& e)
+    {
+	logger.error(std::string("Start failed: MinIO endpoint config parse failed: ") + e.what() + std::string("; g_minio_endpoint = ") + g_minio_endpoint);
 	return 1;
     }
 
