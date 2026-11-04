@@ -7,7 +7,6 @@
 #include <functional>
 #include "../global/GlobalVar.h"
 
-#define ThreadPoolSize 5
 class ThreadPool
 {
 public:

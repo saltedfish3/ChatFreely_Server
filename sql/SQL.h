@@ -3,9 +3,15 @@
 #include <string>
 #include <chrono>
 #include <stdexcept>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include "logger/Logger.h"
 
 class SQL
 {
+static Logger logger;
+
 public:
     SQL(uint minutes_timeAlive, uint minutes_timeFree);
     ~SQL();

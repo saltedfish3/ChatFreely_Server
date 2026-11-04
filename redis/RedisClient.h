@@ -24,7 +24,7 @@ static Logger logger;
 
 public:
     static RedisClient& getClient();
-    void init(const std::string& host = "127.0.0.1", int port = 6379, const std::string& password = "", int poolSize = 4);
+    bool init(const std::string& host = "127.0.0.1", int port = 6379, const std::string& password = "", int poolSize = 4);
 
     bool setWithExpired(const std::string& key, const std::string& value, int seconds);
     bool setIfNoExists(const std::string& key, const std::string& value, int seconds);
@@ -58,4 +58,8 @@ private:
     std::mutex mutex_handler;
     std::unordered_map<uint64_t, std::function<void(int64_t uid, const std::string& content)>> map_handlers;
     uint64_t nextHandlerID = 1;
+
+    std::string host;
+    int port = 6379;
+    std::string password;
 };

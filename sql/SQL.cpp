@@ -1,5 +1,8 @@
 #include "SQL.h"
+#include "GlobalVar.h"
 #include <mysql/mysql.h>
+
+Logger SQL::logger("sql");
 
 SQL::SQL(uint minutes_timeAlive, uint minutes_timeFree)
     :res(nullptr),
@@ -70,6 +73,7 @@ bool SQL::connectServer(const char* host, unsigned short port, const char* usern
 
 	if(mysql_real_connect(this->mysql, host, username, password, db, port, nullptr, clientFlag) == nullptr)
 	{
+	    logger.error(std::string("MySQL connect failed: ") + mysql_error(this->mysql));
 	    AllReInit();
 	    return false;
 	}

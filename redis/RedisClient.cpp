@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <sw/redis++/command_options.h>
 #include <sw/redis++/errors.h>
@@ -30,11 +31,15 @@ RedisClient::~RedisClient()
     stopSubscriber();
 }
 
-void RedisClient::init(const std::string& host, int port, const std::string& password, int poolSize)
+bool RedisClient::init(const std::string& host, int port, const std::string& password, int poolSize)
 {
     std::lock_guard<std::mutex> lock(this->mutex_init);
     if(this->inited)
-	return;
+	return false;
+
+    this->host = host;
+    this->port = port;
+    this->password = password;
 
     ConnectionOptions connOpts;
     connOpts.host = host;
@@ -42,21 +47,32 @@ void RedisClient::init(const std::string& host, int port, const std::string& pas
     if(!password.empty())
 	connOpts.password = password;
 
-    connOpts.connect_timeout = std::chrono::milliseconds(500);
-    connOpts.socket_timeout = std::chrono::milliseconds(200);
+    connOpts.connect_timeout = std::chrono::milliseconds(g_redis_connect_timeout);
+    connOpts.socket_timeout = std::chrono::milliseconds(g_redis_socket_timeout);
 
     ConnectionPoolOptions poolOpts;
     poolOpts.size = poolSize;
     poolOpts.wait_timeout = std::chrono::milliseconds(100);
 
     this->redis = std::make_unique<Redis>(connOpts, poolOpts);
+
+    this->redis->ping();
+    
     this->inited = true;
+    return true;
 }
 
 bool RedisClient::setWithExpired(const std::string& key, const std::string& value, int seconds)
 {
     if(!this->redis)
 	return false;
+
+    thread_local std::mt19937 gen(std::random_device{}());
+    int randomCount = seconds / 10;
+    {
+	std::uniform_int_distribution<int> dist(-randomCount, randomCount);
+	seconds += dist(gen);
+    }
 
     try
     {
@@ -186,10 +202,12 @@ void RedisClient::startSubscriber()
 	    try
 	    {
 		ConnectionOptions opts;
-		opts.host = "127.0.0.1";
-		opts.port = 6379;
-		opts.password = "PLM6123304PLM";
-		opts.socket_timeout = std::chrono::milliseconds(1000);
+		opts.host = this->host;
+		opts.port = this->port;
+		if(!this->password.empty())
+		    opts.password = this->password;
+		opts.connect_timeout = std::chrono::milliseconds(g_redis_connect_timeout);
+		opts.socket_timeout = std::chrono::milliseconds(g_redis_socket_timeout);
 
 		auto redisSub = sw::redis::Redis(opts);
 		auto sub = redisSub.subscriber();

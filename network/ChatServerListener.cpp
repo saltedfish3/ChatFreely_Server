@@ -1,4 +1,5 @@
 #include "ChatServerListener.h"
+#include "GlobalVar.h"
 #include <event2/util.h>
 #include <filesystem>
 #include <sodium/randombytes.h>
@@ -14,10 +15,7 @@ ChatServerListener::ChatServerListener(unsigned short port,int workerNum, int up
 {
     this->base = event_base_new();
     if(!this->base)
-    {
-	logger.error("Create Event_Base Error");
-	exit(1);
-    }
+	throw std::runtime_error("Create Event_Base Error");
 
     sockaddr_in saddr;
     saddr.sin_family = AF_INET;
@@ -30,8 +28,7 @@ ChatServerListener::ChatServerListener(unsigned short port,int workerNum, int up
 	if(this->base)
 	    event_base_free(this->base);	
 	this->base = nullptr;
-	logger.error(std::string("Create Listener Error") + evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
-	exit(1);
+	throw std::runtime_error(std::string("Create Listener Error") + evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
     }
 
     this->ev_sigint = evsignal_new(this->base, SIGINT, cb_sigint, this);
@@ -43,27 +40,22 @@ ChatServerListener::ChatServerListener(unsigned short port,int workerNum, int up
 	if(this->listener)
 	    evconnlistener_free(this->listener);
 	this->listener = nullptr;
-	logger.error("Create Signal-INT Error");
+	throw std::runtime_error("Create Signal-INT Error");
     }
     event_add(this->ev_sigint, nullptr);
 
     this->list_worker.reserve(workerNum>0?workerNum:1);
-    try
+	
+    loadJwtSecret(g_jwt_secret_file);
+    for(int i = 0; i < (workerNum>0?workerNum:1); i++)
     {
-	loadJwtSecret("./secret/jwt_secret.key");
-	for(int i = 0; i < (workerNum>0?workerNum:1); i++)
-	{
-	    auto worker = std::make_unique<ChatServerWorker>();
-	    worker->run();
-	    this->list_worker.emplace_back(std::move(worker));
-	}
-	SQLPool::getSQLPool();
-	ThreadPool::getThreadPool();
-    }catch(const std::runtime_error& e)
-    {
-	logger.error(e.what());
-	exit(1);
+	auto worker = std::make_unique<ChatServerWorker>();
+	worker->run();
+	this->list_worker.emplace_back(std::move(worker));
     }
+    
+    SQLPool::getSQLPool();
+    ThreadPool::getThreadPool();
 
     this->list_UploadWorker.reserve(uploadWorkerNum>0?uploadWorkerNum:1);
     for(int i = 0; i < (uploadWorkerNum>0?uploadWorkerNum:0); i++)
@@ -97,7 +89,7 @@ void ChatServerListener::cb_listener(evconnlistener* listener,evutil_socket_t fd
     if(!csl)
     {
 	logger.error("cb_listener pointer arg error:nullptr");
-	exit(1);
+	throw;
     }
 
     std::string client_ip = "unknown";
@@ -135,29 +127,20 @@ void ChatServerListener::cb_sigint(evutil_socket_t sig,short events, void* arg)
 void ChatServerListener::loadJwtSecret(const std::string& filepath)
 {
     std::ifstream ifs(filepath);
-    if(ifs.good())
+    if(!ifs.is_open())
     {
-	std::string secret;
-	std::getline(ifs, secret);
-	if(!secret.empty())
-	{
-	    jwt_secret = secret;
-	    ifs.close();
-	    return;
-	}
+	throw  std::runtime_error("JWT secret file not found" + filepath);
     }
+
+    std::string secret;
+    std::getline(ifs, secret);
     ifs.close();
 
-    unsigned char buf[32];
-    randombytes_buf(buf, sizeof(buf));
-    char hex[65];
-    sodium_bin2hex(hex, sizeof(hex), buf, sizeof(buf));
-    jwt_secret = std::string(hex, 64);
-    std::filesystem::create_directories(std::filesystem::path(filepath).parent_path());
-    std::ofstream ofs(filepath, std::ios::trunc);
-    if(!ofs.is_open())
-	throw std::runtime_error("持久化JWT密钥文件失败：" + filepath);
-    ofs << jwt_secret;
-    ofs.close();
-    chmod(filepath.c_str(), S_IRUSR | S_IWUSR);
+    if(!secret.empty() && secret.back() == '\r')
+	secret.pop_back();
+
+    if(secret.empty())
+	throw std::runtime_error("JWT secret file is empty: " + filepath);
+
+    jwt_secret = secret;
 }

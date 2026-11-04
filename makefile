@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wno-deprecated-declarations
+CXXFLAGS = -std=c++17 -g -O0 -Wall -Wno-deprecated-declarations
 
 MINIO_ROOT = /home/saltedfish/vcpkg/installed/x64-linux
 

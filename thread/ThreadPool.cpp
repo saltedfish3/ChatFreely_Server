@@ -2,8 +2,9 @@
 
 ThreadPool::ThreadPool()
 {
-    this->list_thread.reserve(ThreadPoolSize);
-    for(int i = 0; i < ThreadPoolSize; i++)
+    int n = g_thread_pool_size > 0 ? g_thread_pool_size : 4;
+    this->list_thread.reserve(n);
+    for(int i = 0; i < n; i++)
     {
 	this->list_thread.emplace_back(std::thread(&ThreadPool::threadRun, this));
     }

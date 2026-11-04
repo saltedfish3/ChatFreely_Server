@@ -45,27 +45,19 @@ ChatServerWorker::ChatServerWorker()
     if(sodium_init() < 0)
 	throw std::runtime_error("init sodium error");
 
-    try
-    {
-	RedisClient::getClient().init("127.0.0.1", 6379, "PLM6123304PLM", 4);
-	RedisClient::getClient().startSubscriber();
-	this->subscriberHandlerID = RedisClient::getClient().addHandler([this](int64_t uid, const std::string& content){
-	    std::shared_ptr<session> sessPtr;
-	    {
-		std::shared_lock lock(mutex_local_sessions);
-		auto it = local_sessions.find(uid);
-		if(it != local_sessions.end())
-		    sessPtr = it->second.lock();
-	    }
+    this->subscriberHandlerID = RedisClient::getClient().addHandler([this](int64_t uid, const std::string& content){
+	std::shared_ptr<session> sessPtr;
+	{
+	    std::shared_lock lock(mutex_local_sessions);
+	    auto it = local_sessions.find(uid);
+	    if(it != local_sessions.end())
+		sessPtr = it->second.lock();
+	}
 
-	    if(!sessPtr || sessPtr->myself != this)
-		return;
-	    pushToLocalUser(uid, content);
-	});
-    }catch(const std::exception& e)
-    {
-	logger.warn("Redis Init Failed");
-    }
+	if(!sessPtr || sessPtr->myself != this)
+	    return;
+	pushToLocalUser(uid, content);
+    });
 }
 
 ChatServerWorker::~ChatServerWorker()

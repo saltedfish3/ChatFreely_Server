@@ -12,9 +12,11 @@
 #include <miniocpp/client.h>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 #include "../global/GlobalVar.h"
 #include "../logger/Logger.h"
 #include "miniocpp/utils.h"
+#include "../thread/ThreadPool.h"
 
 class ChatServerUploadWorker
 {

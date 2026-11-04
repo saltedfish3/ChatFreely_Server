@@ -1,13 +1,21 @@
 #include "ChatServerUploadWorker.h"
+#include <asm-generic/socket.h>
 #include <curlpp/Easy.hpp>
 #include <curlpp/Options.hpp>
 #include <curlpp/cURLpp.hpp>
+#include "GlobalVar.h"
 #include "miniocpp/utils.h"
 #include "miniocpp/signer.h"
 #include <cctype>
 #include <cstdlib>
+#include <event2/bufferevent.h>
+#include <event2/util.h>
 #include <exception>
+#include <functional>
+#include <netinet/in.h>
 #include <sstream>
+#include <stdexcept>
+#include <sys/socket.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -53,10 +61,41 @@ ChatServerUploadWorker::ChatServerUploadWorker()
 	throw std::runtime_error("UploadWorker Create Http Error");
     }
 
-    if(evhttp_bind_socket(this->http, "0.0.0.0", UploadPort) != 0)
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if(listen_fd < 0)
+	throw std::runtime_error("Create Socket Error");
+
+    int on = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+    if(setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on)))
+	logger.warn("SO_REUSEPORT not support. Fallback to single thread bind");
+
+    evutil_make_socket_nonblocking(listen_fd);
+
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(g_upload_port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if(bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0)
     {
+	close(listen_fd);
 	evhttp_free(this->http);
 	event_base_free(this->base);
+	throw std::runtime_error("UploadWorker Bind Port Error: " + std::to_string(g_upload_port));
+    }
+
+    if(listen(listen_fd, SOMAXCONN) < 0)
+    {
+	close(listen_fd);
+	throw std::runtime_error("UploadWorker Listen Error");
+    }
+
+    if(evhttp_accept_socket(this->http, listen_fd) != 0)
+    {
+	close(listen_fd);
 	throw std::runtime_error("UploadWorker Bind Port Error");
     }
     
@@ -91,8 +130,8 @@ void ChatServerUploadWorker::stop()
 
 minio::s3::Client& ChatServerUploadWorker::getMinioClient()
 {
-    static minio::s3::BaseUrl baseUrl("http://192.168.153.128:9000");
-    static minio::creds::StaticProvider providers("saltedfish_test", "saltedfish_test");
+    static minio::s3::BaseUrl baseUrl(g_minio_endpoint);
+    static minio::creds::StaticProvider providers(g_minio_access_key, g_minio_secret_key);
     static minio::s3::Client client(baseUrl, &providers);
     return client;
 }
@@ -251,21 +290,29 @@ std::string ChatServerUploadWorker::sendSignedGet(const std::string& uri, const 
 {
     auto date = minio::utils::UtcTime::Now();
 
+    std::string minioHost = g_minio_endpoint;
+    if(minioHost.rfind("http://", 0) == 0)
+	minioHost = minioHost.substr(7);
+    else if(minioHost.rfind("https://", 0) == 0)
+	minioHost = minioHost.substr(8);
+
     minio::utils::Multimap headers;
-    headers.Add("Host", "192.168.153.128:9000");
+    headers.Add("Host", minioHost);
     headers.Add("X-Amz-Date", date.ToAmzDate());
 
     minio::utils::Multimap query_params = query_params_in;
     std::string empty_sha256 = minio::utils::Sha256Hash("");
 
-    minio::signer::SignV4S3(minio::http::Method::kGet, uri, "us-east-1", headers, query_params, "saltedfish_test", "saltedfish_test", empty_sha256, date);
+    minio::signer::SignV4S3(minio::http::Method::kGet, uri, g_minio_region, headers, query_params, g_minio_access_key, g_minio_secret_key, empty_sha256, date);
 
-    std::string url = "http://192.168.153.128:9000" + uri + "?" + query_params.ToQueryString();
+    std::string url = g_minio_endpoint + uri + "?" + query_params.ToQueryString();
 
     curlpp::Easy req;
     req.setOpt(curlpp::options::Url(url));
     req.setOpt(curlpp::options::CustomRequest("GET"));
     req.setOpt(curlpp::options::HttpHeader(headers.ToHttpHeaders()));
+    req.setOpt(curlpp::options::ConnectTimeout(g_http_connect_timeout));
+    req.setOpt(curlpp::options::Timeout(g_http_total_timeout));
 
     std::ostringstream response;
     req.setOpt(curlpp::options::WriteStream(&response));
@@ -426,14 +473,14 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
     }
 
     std::string key = suffix.empty() ? head + md5 : head + md5 + "." + suffix;
-    std::string publicUrl = "http://192.168.153.128/chat/" + key;
+    std::string publicUrl = g_public_url_prefix + key;
 
     json resp;
     resp["Url"] = publicUrl;
 
     bool skipThumb = j.value("SkipThumbnail", "0") == "1";
 
-    if(isExists("chat", key))
+    if(isExists(g_minio_bucket, key))
     {
 	resp["Exists"] = true;
 
@@ -444,8 +491,8 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 	    {
 		std::string suffix = key.substr(dotPos + 1);
 		std::string thumbKey = key.substr(0, dotPos) + "thumbnail." + suffix;
-		if(isExists("chat", thumbKey))
-		    resp["ThumbnailUrl"] = "http://192.168.153.128/chat/" + thumbKey;
+		if(isExists(g_minio_bucket, thumbKey))
+		    resp["ThumbnailUrl"] = g_public_url_prefix + thumbKey;
 	    }
 	}
     }
@@ -463,7 +510,7 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 	    if(startsWith(key, "images/"))
 	    {
 		const char* hostHeader = evhttp_find_header(input_header, "Host");
-		std::string host = hostHeader ? hostHeader : "192.168.153.128:9003";
+		std::string host = hostHeader ? hostHeader : g_upload_public_host;
 		std::string singleUrl = "http://" + host + "/upload/single?ObjectKey=" + key;
 		if(skipThumb)
 		    singleUrl += "&skipThumbnail=1";
@@ -471,7 +518,7 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 	    }
 	    else
 	    {
-		std::string uploadUrl = createUploadUrl("chat", key);
+		std::string uploadUrl = createUploadUrl(g_minio_bucket, key);
 		if(uploadUrl.empty())
 		{
 		    evhttp_send_reply(req, 500, nullptr, nullptr);
@@ -482,12 +529,12 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 	}
 	else 
 	{
-	    std::string uploadId = findExistingMultipartUploadID("chat", key);
+	    std::string uploadId = findExistingMultipartUploadID(g_minio_bucket, key);
 	    bool isNew = uploadId.empty();
 
 	    if(isNew)
 	    {
-		uploadId = createMultipartUpload("chat", key, mimeType);
+		uploadId = createMultipartUpload(g_minio_bucket, key, mimeType);
 		if(uploadId.empty())
 		{
 		    evhttp_send_reply(req, 500, nullptr, nullptr);
@@ -499,13 +546,13 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 	    if(partCount > max_part_count)
 	    {
 		if(isNew)
-		    abortMultipartUpload("chat", key, uploadId);
+		    abortMultipartUpload(g_minio_bucket, key, uploadId);
 		evhttp_send_reply(req, 413, nullptr, nullptr);
 		return;
 	    }
 
 	    json uploadedParts = json::array();
-	    getUploadedParts("chat", key, uploadId, uploadedParts);
+	    getUploadedParts(g_minio_bucket, key, uploadId, uploadedParts);
 
 	    resp["Exists"] = false;
 	    resp["ObjectKey"] = key;
@@ -575,7 +622,7 @@ void ChatServerUploadWorker::cb_uploadPart(evhttp_request* req, void* arg)
     evbuffer_copyout(buf_input, &body[0], len_body);
 
     std::string etag;
-    if(!uploadPart("chat", key, uploadId, static_cast<int>(partNumber), body.data(), body.size(), etag))
+    if(!uploadPart(g_minio_bucket, key, uploadId, static_cast<int>(partNumber), body.data(), body.size(), etag))
     {
         evhttp_send_reply(req, 500, nullptr, nullptr);
 	return;
@@ -675,42 +722,64 @@ void ChatServerUploadWorker::cb_uploadComplete(evhttp_request* req, void* arg)
 	return;
     }
 
-    if(!completeMultipartUpload("chat", key, uploadId, parts))
-    {
-	evhttp_send_reply(req, 500, nullptr, nullptr);
-	return;
-    }
+    auto* conn = evhttp_request_get_connection(req);
+    auto* bev = evhttp_connection_get_bufferevent(conn);
+    auto* base = bufferevent_get_base(bev);
 
-    int64_t maxSize = 0;
-    if(startsWith(key, "images/"))
-	maxSize = 10LL * 1024 * 1024;
-    else if(startsWith(key, "videos/"))
-	maxSize = 1024LL * 1024 * 1024;
-    else if(startsWith(key, "files/"))
-	maxSize = 2LL * 1024 * 1024 * 1024;
-    else
-    {
-	evhttp_send_reply(req, 400, nullptr, nullptr);
-	return;
-    }
+    ThreadPool::getThreadPool()->addTask([base, req, key, uploadId, parts](){
+	bool isSuccess = completeMultipartUpload(g_minio_bucket, key, uploadId, parts);
+	bool smallThanMax = false;
+	int64_t actualSize = 0;
+	
+	if(isSuccess)
+	{
+	    int64_t maxSize = 0;
+	    if(startsWith(key, "images/"))
+		maxSize = 10LL * 1024 * 1024;
+	    else if(startsWith(key, "videos/"))
+		maxSize = 1024LL * 1024 * 1024;
+	    else if(startsWith(key, "files/"))
+		maxSize = 2LL * 1024 * 1024 * 1024;
 
-    int64_t actualSize = 0;
-    if(!getObjectSize("chat", key, actualSize) || actualSize > maxSize)
-    {
-	removeObject("chat", key);
-	logger.warn("合并的文件大小超过最大值，执行删除:" + key);
-	evhttp_send_reply(req, 413, nullptr, nullptr);
-	return;
-    }
+	    if(getObjectSize(g_minio_bucket, key, actualSize) && actualSize <= maxSize)
+		smallThanMax = true;
+	    else
+	    {
+		removeObject(g_minio_bucket, key);
+		logger.warn("合并的文件大小超过最大值，执行删除:" + key);
+	    }
+	}
 
-    json resp;
-    resp["Url"] = "http://192.168.153.128/chat/" + key;
-    std::string respStr = resp.dump();
+	auto* func = new std::function<void()>([req, isSuccess, smallThanMax, key](){
+	    if(!isSuccess)
+	    {
+		evhttp_send_reply(req, 500, nullptr, nullptr);
+		return;
+	    }
 
-    evbuffer* out = evbuffer_new();
-    evbuffer_add(out, respStr.data(), respStr.size());
-    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
-    evhttp_send_reply(req, 200, nullptr, out);
+	    if(!smallThanMax)
+	    {
+		evhttp_send_reply(req, 413, nullptr, nullptr);
+		return;
+	    }
+
+	    json resp;
+	    resp["Url"] = g_public_url_prefix + key;
+	    std::string respStr = resp.dump();
+
+	    evbuffer* out = evbuffer_new();
+	    evbuffer_add(out, respStr.data(), respStr.size());
+	    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
+	    evhttp_send_reply(req, 200, nullptr, out);
+	});
+
+	timeval tv = {0, 0};
+	event_base_once(base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	    auto* func = static_cast<std::function<void()>*>(arg);
+	    (*func)();
+	    delete func;
+	}, func, &tv);
+    });
 }
 
 void ChatServerUploadWorker::cb_uploadSingle(evhttp_request* req, void* arg)
@@ -786,31 +855,48 @@ void ChatServerUploadWorker::cb_uploadSingle(evhttp_request* req, void* arg)
     const char* ct = evhttp_find_header(input_header, "Content-Type");
     std::string mimeType = ct ? std::string(ct) : "application/octet-stream";
 
-    if(!putObject("chat", objectKey, body, mimeType))
-    {
-	evhttp_send_reply(req, 500, nullptr, nullptr);
-	return;
-    }
-
     std::string skipThumb = getUrlQueryParam(std::string(uri), "skipThumbnail");
     bool needThumb = skipThumb != "1";
 
-    std::string publicUrl = "http://192.168.153.128/chat/" + objectKey;
-    std::string thumbUrl;
+    auto* conn = evhttp_request_get_connection(req);
+    auto* bev = evhttp_connection_get_bufferevent(conn);
+    auto* base = bufferevent_get_base(bev);
 
-    if(needThumb)
-	generateThumbnailFromData("chat", objectKey, body, thumbUrl);
+    ThreadPool::getThreadPool()->addTask([base, req, objectKey, body, mimeType, needThumb](){
+	bool isSuccess = putObject(g_minio_bucket, objectKey, body, mimeType);
 
-    json resp;
-    resp["Url"] = publicUrl;
-    if(!thumbUrl.empty())
-	resp["ThumbnailUrl"] = thumbUrl;
+	std::string publicUrl = g_public_url_prefix + objectKey;
+	std::string thumbUrl;
 
-    std::string respStr = resp.dump();
-    evbuffer* out = evbuffer_new();
-    evbuffer_add(out, respStr.data(), respStr.size());
-    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
-    evhttp_send_reply(req, 200, nullptr, out);
+	if(isSuccess && needThumb)
+	    generateThumbnailFromData(g_minio_bucket, objectKey, body, thumbUrl);
+	
+	auto* func = new std::function<void()>([req, isSuccess, publicUrl, thumbUrl](){
+	    if(!isSuccess)
+	    {
+		evhttp_send_reply(req, 500, nullptr, nullptr);
+		return;
+	    }
+
+	    json resp;
+	    resp["Url"] = publicUrl;
+	    if(!thumbUrl.empty())
+		resp["ThumbnailUrl"] = thumbUrl;
+
+	    std::string respStr = resp.dump();
+	    evbuffer* out = evbuffer_new();
+	    evbuffer_add(out, respStr.data(), respStr.size());
+	    evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
+	    evhttp_send_reply(req, 200, nullptr, out);
+	});
+
+	timeval tv = {0, 0};
+	event_base_once(base, -1, EV_TIMEOUT, [](evutil_socket_t, short, void* arg){
+	    auto* func = static_cast<std::function<void()>*>(arg);
+	    (*func)();
+	    delete func;
+	}, func, &tv);
+    });
 }
 
 bool ChatServerUploadWorker::verifyAccessToken(const evkeyvalq* evq)
@@ -941,7 +1027,7 @@ bool ChatServerUploadWorker::generateThumbnailFromData(const std::string& bucket
     }
 
     std::string thumbKey = key.substr(0, dotPos) + "thumbnail." + suffix;
-    std::string thumbUrl = "http://192.168.153.128/chat/" + thumbKey;
+    std::string thumbUrl = g_public_url_prefix + thumbKey;
     if(isExists(bucket, thumbKey))
     {
 	outThumbUrl = thumbUrl;
@@ -982,7 +1068,7 @@ bool ChatServerUploadWorker::generateThumbnailFromData(const std::string& bucket
     if(targetWidth == width && targetHeight == height)
     {
 	stbi_image_free(pixels);
-	outThumbUrl = "http://192.168.153.128/chat/" + key;
+	outThumbUrl = g_public_url_prefix + key;
 	return true;
     }
 
