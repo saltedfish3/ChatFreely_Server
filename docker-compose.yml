@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: saltedfish
+      MINIO_ROOT_PASSWORD: PLM6123304PLM
+      # 强制预签名 URL 使用 HTTPS 和你的 IP
+      MINIO_SERVER_URL: "https://192.168.153.128"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      # 因为之前查出来的名字就是 minio-data，所以这里保持一致
+      - minio-data:/data
+    restart: unless-stopped
+
+volumes:
+  minio-data:
+    external: true # 告诉 Docker 这是一个已经存在的卷，直接用，别新建

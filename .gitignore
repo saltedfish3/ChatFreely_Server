@@ -13,3 +13,4 @@ logs/
 *.log
 config/ServerConfig.conf
 secret/
+minio_data/

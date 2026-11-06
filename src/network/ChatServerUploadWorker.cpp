@@ -511,7 +511,10 @@ void ChatServerUploadWorker::cb_uploadInit(evhttp_request* req, void* arg)
 	    {
 		const char* hostHeader = evhttp_find_header(input_header, "Host");
 		std::string host = hostHeader ? hostHeader : g_upload_public_host;
-		std::string singleUrl = "http://" + host + "/upload/single?ObjectKey=" + key;
+
+		const char* protoHeader = evhttp_find_header(input_header, "X-Forwarded-Proto");
+		std::string proto = protoHeader ? protoHeader : "http";
+		std::string singleUrl = proto + "://" + host + "/upload/single?ObjectKey=" + key;
 		if(skipThumb)
 		    singleUrl += "&skipThumbnail=1";
 		resp["UploadUrl"] = singleUrl;
