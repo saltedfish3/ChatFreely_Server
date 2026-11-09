@@ -1,3 +1,5 @@
+CREATE DATABASE IF NOT EXISTS ChatFreely DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+USE ChatFreely;
 CREATE TABLE `user` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT '用户ID（自增，从1000000000开始）',
   `snowid` bigint unsigned NOT NULL COMMENT '分布式唯一ID',
