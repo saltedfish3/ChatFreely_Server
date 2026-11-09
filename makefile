@@ -2,7 +2,7 @@ CXX = g++
 MODE = debug
 
 ifeq ($(MODE),release)
-CXXFLAGS = -std=c++17 -02 -DNDEBUG -Wall -Wno-deprecated-declarations
+CXXFLAGS = -std=c++17 -O2 -DNDEBUG -Wall -Wno-deprecated-declarations
 else
 CXXFLAGS = -std=c++17 -g -O0 -Wall -Wno-deprecated-declarations
 endif
