@@ -4,6 +4,7 @@
   "version-semver": "1.0.0",
   "description": "ChatFreely 服务端，依赖统一由 vcpkg 管理",
   "dependencies": [
+    "jwt-cpp",
     "minio-cpp",
     "curlpp",
     "curl",
