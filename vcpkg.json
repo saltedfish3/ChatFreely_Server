@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "chat-freely-server",
+  "version-semver": "1.0.0",
+  "description": "ChatFreely 服务端，依赖统一由 vcpkg 管理",
+  "dependencies": [
+    "minio-cpp",
+    "curlpp",
+    "curl",
+    "pugixml",
+    "openssl",
+    "zlib",
+    "libsodium",
+    "hiredis",
+    "hiredis",
+    {
+      "name": "redis-plus-plus",
+      "features": [
+        "cxx17"
+      ]
+    },
+    {
+      "name": "libevent",
+      "features": [
+        "openssl",
+        "thread"
+      ]
+    },
+    {
+      "name": "inih",
+      "features": [
+        "cpp"
+      ]
+    },
+    "libmysql"
+  ]
+}

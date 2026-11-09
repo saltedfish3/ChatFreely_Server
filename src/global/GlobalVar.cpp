@@ -43,6 +43,7 @@ std::string g_minio_access_key = "minioadmin";
 std::string g_minio_secret_key = "minioadmin";
 std::string g_minio_region = "us-east-1";
 std::string g_minio_bucket = "chat";
+bool g_minio_use_virtual_host = false;
 
 std::string g_public_url_prefix = "http://127.0.0.1/bucket/";
 std::string g_upload_public_host = "127.0.0.1:9003";
@@ -117,7 +118,9 @@ static void writeDefaultConfig(const std::string& path)
     ofs << "minio_access_key = " << g_minio_access_key << "\n";
     ofs << "minio_secret_key = " << g_minio_secret_key << "\n";
     ofs << "minio_region = " << g_minio_region << "\n";
-    ofs << "minio_bucket = " << g_minio_bucket << "\n\n";
+    ofs << "minio_bucket = " << g_minio_bucket << "\n";
+    ofs << "# 使用云厂商通常为 true\n";
+    ofs << "minio_use_virtual_host = " << g_minio_use_virtual_host << "\n";
 
     ofs << "# ========== Public Access ==========\n";
     ofs << "public_url_prefix = " << g_public_url_prefix << "\n";
@@ -219,6 +222,8 @@ void loadServerConfig(const std::string& configPath)
 		g_minio_region = value;
 	    else if(key == "minio_bucket")
 		g_minio_bucket = value;
+	    else if(key == "minio_use_virtual_host")
+		g_minio_use_virtual_host = value == "true" || value == "1";
 	    else if(key == "public_url_prefix")
 		g_public_url_prefix = value;
 	    else if(key == "upload_public_host")

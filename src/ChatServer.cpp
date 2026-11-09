@@ -10,6 +10,7 @@
 #include <asm-generic/socket.h>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <exception>
 #include <fcntl.h>
 #include <filesystem>
@@ -178,29 +179,53 @@ static bool checkMinioReady(const std::string& endpoint, const std::string& acce
 {
     try
     {
-	minio::s3::BaseUrl BaseUrl(endpoint);
+	std::string virtualEndpoint = endpoint;
+	while(!virtualEndpoint.empty() && virtualEndpoint.back() == '/')
+	    virtualEndpoint.pop_back();
+
+	bool isHttps = (virtualEndpoint.rfind("https://", 0) == 0) ? true : false;
+
+	minio::s3::BaseUrl BaseUrl(virtualEndpoint, isHttps, g_minio_region);
+	BaseUrl.virtual_style = g_minio_use_virtual_host;
+
 	minio::creds::StaticProvider provider(accessKey, secretKey);
 	minio::s3::Client client(BaseUrl, &provider);
 
 	minio::s3::BucketExistsArgs args;
 	args.bucket = bucket;
+	if(!g_minio_region.empty())
+	    args.region = g_minio_region;
 
 	auto resp = client.BucketExists(args);
 
-	std::string errStr = resp.Error().String();
-	if(!errStr.empty())
+	if(resp)
+	    return true;
+
+	const int http = resp.status_code;
+	const std::string& code = resp.code;
+
+	if(http == 404 || code == "NoSuchBucket")
+	    return true;
+
+	if(http == 403 || code == "AccessDenied")
 	{
-	    outErrMsg = errStr;
+	    outErrMsg = "AccessDenied: endpoint reachable but credentials lack permission";
 	    return false;
 	}
 
-	if(!resp)
+	if(http == 301 || http == 307 || code == "PermanentRedirect" || code == "AuthorizationHeaderMalformed")
 	{
-	    outErrMsg = "bucket not exists: " + bucket;
+	    outErrMsg = "region/endpoint mismatch (HTTP " + std::to_string(http) + ", " + code + ")";
 	    return false;
 	}
-	
-	return true;
+
+	if(http == 0)
+	    outErrMsg = resp.Error().String();
+	else
+	    outErrMsg = (code.empty() ? std::string("UnknownError") : code) + " (HTTP " + std::to_string(http) + "): " + resp.message;
+
+	return false;
+
     }catch(const std::exception& e)
     {
 	outErrMsg = e.what();
@@ -210,7 +235,9 @@ static bool checkMinioReady(const std::string& endpoint, const std::string& acce
 
 int main(int argc, char* argv[])
 {
-    std::string configPath = "./config/ServerConfig.conf";
+    std::error_code ec;
+    auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+    std::string configPath = ec ? "./config/ServerConfig.conf" : (exe.parent_path() / "config" / "ServerConfig.conf").lexically_normal().string();
     std::string genSecretPath;
 
     for(int i = 1; i < argc; i++)
@@ -245,6 +272,7 @@ int main(int argc, char* argv[])
 	    return 1;
 	}
     }
+    
 
     try
     {

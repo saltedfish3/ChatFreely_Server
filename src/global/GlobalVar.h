@@ -83,6 +83,7 @@ extern std::string g_minio_access_key;
 extern std::string g_minio_secret_key;
 extern std::string g_minio_region;
 extern std::string g_minio_bucket;
+extern bool g_minio_use_virtual_host;
 
 //Public Access
 extern std::string g_public_url_prefix;

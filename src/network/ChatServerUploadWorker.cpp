@@ -130,7 +130,15 @@ void ChatServerUploadWorker::stop()
 
 minio::s3::Client& ChatServerUploadWorker::getMinioClient()
 {
-    static minio::s3::BaseUrl baseUrl(g_minio_endpoint);
+    std::string endpoint = g_minio_endpoint;
+    while(!endpoint.empty() && endpoint.back() == '/')
+	endpoint.pop_back();
+
+    bool isHttps = (endpoint.rfind("https://", 0) == 0);
+
+    static minio::s3::BaseUrl baseUrl(endpoint, isHttps, g_minio_region);
+    baseUrl.virtual_style = g_minio_use_virtual_host; 
+
     static minio::creds::StaticProvider providers(g_minio_access_key, g_minio_secret_key);
     static minio::s3::Client client(baseUrl, &providers);
     return client;
@@ -296,16 +304,33 @@ std::string ChatServerUploadWorker::sendSignedGet(const std::string& uri, const 
     else if(minioHost.rfind("https://", 0) == 0)
 	minioHost = minioHost.substr(8);
 
+    if(!minioHost.empty() && minioHost.back() == '/')
+	minioHost.pop_back();
+
+    std::string realUri = uri;
+    if(g_minio_use_virtual_host)
+    {
+	minioHost = g_minio_bucket + "." + minioHost;
+	size_t pos = uri.find('/', 1);
+	if(pos != std::string::npos)
+	    realUri = uri.substr(pos);
+	else
+	    realUri = "/";
+    }
+    
+    std::string empty_sha256 = minio::utils::Sha256Hash("");
+
     minio::utils::Multimap headers;
     headers.Add("Host", minioHost);
+    headers.Add("x-amz-content-sha256", empty_sha256);
     headers.Add("X-Amz-Date", date.ToAmzDate());
 
     minio::utils::Multimap query_params = query_params_in;
-    std::string empty_sha256 = minio::utils::Sha256Hash("");
 
-    minio::signer::SignV4S3(minio::http::Method::kGet, uri, g_minio_region, headers, query_params, g_minio_access_key, g_minio_secret_key, empty_sha256, date);
+    minio::signer::SignV4S3(minio::http::Method::kGet, realUri, g_minio_region, headers, query_params, g_minio_access_key, g_minio_secret_key, empty_sha256, date);
 
-    std::string url = g_minio_endpoint + uri + "?" + query_params.ToQueryString();
+    std::string scheme = (g_minio_endpoint.find("https://") == 0) ? "https://" : "http://";
+    std::string url = scheme + minioHost + realUri + "?" + query_params.ToQueryString();
 
     curlpp::Easy req;
     req.setOpt(curlpp::options::Url(url));
@@ -320,6 +345,13 @@ std::string ChatServerUploadWorker::sendSignedGet(const std::string& uri, const 
     try
     {
 	req.perform();
+
+	std::string body = response.str();
+	if(body.empty() || body.find("<Error>") != std::string::npos || body.find("<Error ") != std::string::npos)
+	{
+	    logger.error("Signed Get Error: " + body);
+	    return "";
+	}
     }
     catch(const std::exception& e)
     {
@@ -360,7 +392,7 @@ bool ChatServerUploadWorker::getUploadedParts(const std::string& bucket, const s
     for(const auto& part : getXmlBlocks(xml, "Part"))
     {
 	std::string numStr = getXmlBlock(part, "PartNumber");
-	std::string etag = getXmlBlock(part, "ETag");
+	std::string etag = minio::utils::Trim(getXmlBlock(part, "ETag"), '"');
 	if(numStr.empty() || etag.empty())
 	    continue;
 
@@ -702,6 +734,7 @@ void ChatServerUploadWorker::cb_uploadComplete(evhttp_request* req, void* arg)
 
 	std::string partNumStr = p.value("PartNumber", "");
 	std::string etag = p.value("ETag", "");
+	etag = minio::utils::Trim(etag, '"');
 
 	int64_t partNumber = 0;
 	auto [ptr, ec] = std::from_chars(partNumStr.data(), partNumStr.data() + partNumStr.size(), partNumber);
@@ -718,6 +751,10 @@ void ChatServerUploadWorker::cb_uploadComplete(evhttp_request* req, void* arg)
 	}
 	parts.emplace_back(static_cast<int>(partNumber), etag);
     }
+
+    std::sort(parts.begin(), parts.end(), [](const auto& a, const auto& b){
+	return a.first < b.first;
+    });
 
     if(parts.empty() || parts.size() > 10000)
     {

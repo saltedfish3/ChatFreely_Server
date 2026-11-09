@@ -72,7 +72,8 @@ if [ -f "ssl/server.crt" ] && [ -f "ssl/server.key" ]; then
     echo "   - 私钥路径: ssl/server.key"
     echo "   - 绑定域名/IP: ${SERVER_HOST}"
     echo ""
-    echo "现在你可以运行 'docker compose up -d' 启动服务了！"
+    echo "请将 ssl/server.crt 与 ssl/server.key 拷贝到 /etc/nginx/ssl/，"
+    echo "然后执行：nginx -t && systemctl reload nginx"
 else
     echo " 证书生成失败，请检查 openssl 报错信息。"
     exit 1

@@ -34,6 +34,8 @@ minio_access_key = <你的MinIO账号>
 minio_secret_key = <你的MinIO密码>
 minio_region = us-east-1
 minio_bucket = chat
+# 使用云厂商通常为 true
+minio_use_virtual_host = false
 
 # ========== Public Access ==========
 public_url_prefix = https://<你的公网IP或域名>/chat/
