@@ -14,6 +14,10 @@ redis_host = redis
 redis_port = 6379
 redis_password = <你的Redis密码>
 redis_pool_size = 4
+# 是否启用 TLS 连接
+redis_use_ssl = false
+# CA 证书文件路径，服务端证书需要校验时填写；不校验可留空
+redis_ssl_cacert =
 
 # ========== MySQL ==========
 mysql_host = mysql

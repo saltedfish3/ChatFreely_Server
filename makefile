@@ -7,7 +7,7 @@ else
 CXXFLAGS = -std=c++17 -g -O0 -Wall -Wno-deprecated-declarations
 endif
 
-CXXFLAGS += -MMD -MP -pthread
+CXXFLAGS += -MMD -MP -pthread -DREDIS_PLUS_PLUS_HAS_TLS
 
 VCPKG_ROOT = $(HOME)/vcpkg
 VCPKG_TRIPLET = x64-linux
@@ -35,7 +35,7 @@ LDFLAGS = -L$(VCPKG_PREFIX)/lib
 # 链接库
 LIBS = -lminiocpp -lcurlpp -lINIReader -linih -lcurl \
        -lpugixml -levent -levent_pthreads -lsodium \
-       -lredis++ -lhiredis \
+       -lredis++ -lhiredis -lhiredis_ssl\
        -l$(MYSQL_LIB) \
        -lssl -lcrypto -lz -lzstd \
        -lpthread -ldl

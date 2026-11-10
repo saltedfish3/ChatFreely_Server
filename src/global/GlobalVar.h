@@ -63,6 +63,8 @@ extern std::string g_redis_host;
 extern int g_redis_port;
 extern std::string g_redis_password;
 extern int g_redis_pool_size;
+extern bool g_redis_use_ssl;
+extern std::string g_redis_ssl_cacert;
 
 //Mysql
 extern std::string g_mysql_host;

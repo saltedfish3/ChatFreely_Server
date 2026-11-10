@@ -8,6 +8,7 @@
 #include <sw/redis++/connection.h>
 #include <sw/redis++/connection_pool.h>
 #include <sw/redis++/redis++.h>
+#include <sw/redis++/tls.h>
 #include <chrono>
 #include <thread>
 #include <unordered_map>
@@ -19,6 +20,7 @@ class RedisClient
 using Redis = sw::redis::Redis;
 using ConnectionOptions = sw::redis::ConnectionOptions;
 using ConnectionPoolOptions = sw::redis::ConnectionPoolOptions;
+using TlsOptions = sw::redis::tls::TlsOptions;
 
 static Logger logger;
 

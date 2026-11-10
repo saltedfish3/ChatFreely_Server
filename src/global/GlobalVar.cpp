@@ -25,6 +25,8 @@ std::string g_redis_host = "127.0.0.1";
 int g_redis_port = 6379;
 std::string g_redis_password;
 int g_redis_pool_size = 4;
+bool g_redis_use_ssl = false;
+std::string g_redis_ssl_cacert;
 
 std::string g_mysql_host = "127.0.0.1";
 int g_mysql_port = 3306;
@@ -98,7 +100,9 @@ static void writeDefaultConfig(const std::string& path)
     ofs << "redis_host = " << g_redis_host << "\n";
     ofs << "redis_port = " << g_redis_port << "\n";
     ofs << "redis_password = " << g_redis_password << "\n";
-    ofs << "redis_pool_size = " << g_redis_pool_size << "\n\n";
+    ofs << "redis_pool_size = " << g_redis_pool_size << "\n";
+    ofs << "redis_use_ssl = " << (g_redis_use_ssl ? "true" : "false") << "\n";
+    ofs << "redis_ssl_cacert = " << g_redis_ssl_cacert << "\n\n";
 
     ofs << "# ========== Mysql ==========\n";
     ofs << "mysql_host = " << g_mysql_host << "\n";
@@ -120,7 +124,7 @@ static void writeDefaultConfig(const std::string& path)
     ofs << "minio_region = " << g_minio_region << "\n";
     ofs << "minio_bucket = " << g_minio_bucket << "\n";
     ofs << "# 使用云厂商通常为 true\n";
-    ofs << "minio_use_virtual_host = " << g_minio_use_virtual_host << "\n";
+    ofs << "minio_use_virtual_host = " << (g_minio_use_virtual_host ? "true" : "false") << "\n\n";
 
     ofs << "# ========== Public Access ==========\n";
     ofs << "public_url_prefix = " << g_public_url_prefix << "\n";
@@ -190,6 +194,14 @@ void loadServerConfig(const std::string& configPath)
 		g_redis_password = value;
 	    else if(key == "redis_pool_size")
 		g_redis_pool_size = std::stoi(value);
+	    else if(key == "redis_use_ssl")
+	    {
+		std::string v = value;
+		std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+		g_redis_use_ssl = (v == "true" || v == "1" || v == "yes" || v == "on");
+	    }
+	    else if(key == "redis_ssl_cacert")
+		g_redis_ssl_cacert = value;
 	    else if(key == "mysql_host")
 		g_mysql_host = value;
 	    else if(key == "mysql_port")
@@ -223,7 +235,11 @@ void loadServerConfig(const std::string& configPath)
 	    else if(key == "minio_bucket")
 		g_minio_bucket = value;
 	    else if(key == "minio_use_virtual_host")
-		g_minio_use_virtual_host = value == "true" || value == "1";
+	    {
+		std::string v = value;
+		std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+		g_minio_use_virtual_host = (v == "true" || v == "1" || v == "yes" || v == "on");
+	    }
 	    else if(key == "public_url_prefix")
 		g_public_url_prefix = value;
 	    else if(key == "upload_public_host")

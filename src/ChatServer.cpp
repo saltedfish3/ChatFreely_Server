@@ -283,6 +283,23 @@ int main(int argc, char* argv[])
 	return 1;
     }
 
+    try
+    {
+	if(g_node_id.rfind("node_", 0) != 0)
+	    throw std::runtime_error("node_id must be in format node_N");
+
+	int nodeNum = std::stoi(g_node_id.substr(5));
+	if(nodeNum < 1 || nodeNum > 32)
+	    throw std::runtime_error("node_id suffix must in range 1~32");
+
+	sfGen.init(nodeNum - 1, 0);
+	logger.info("Snowflake init: node_id = " + g_node_id + ", workerId=" + std::to_string(nodeNum - 1));
+    }catch(const std::exception& e)
+    {
+	logger.error(std::string("Start failed: ") + e.what());
+	return 1;
+    }
+
     if(!checkTcpPort(g_mysql_host, g_mysql_port, g_mysql_connect_timeout))
     {
 	logger.error("Start failed: MySQL (" + g_mysql_host + ":" + std::to_string(g_mysql_port) + ") is unreachable");

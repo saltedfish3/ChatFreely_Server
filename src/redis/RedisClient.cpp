@@ -47,6 +47,13 @@ bool RedisClient::init(const std::string& host, int port, const std::string& pas
     if(!password.empty())
 	connOpts.password = password;
 
+    if(g_redis_use_ssl)
+    {
+	connOpts.tls.enabled = true;
+	if(!g_redis_ssl_cacert.empty())
+	    connOpts.tls.cacert = g_redis_ssl_cacert;
+    }
+
     connOpts.connect_timeout = std::chrono::milliseconds(g_redis_connect_timeout);
     connOpts.socket_timeout = std::chrono::milliseconds(g_redis_socket_timeout);
 
@@ -208,6 +215,13 @@ void RedisClient::startSubscriber()
 		    opts.password = this->password;
 		opts.connect_timeout = std::chrono::milliseconds(g_redis_connect_timeout);
 		opts.socket_timeout = std::chrono::milliseconds(g_redis_socket_timeout);
+
+		if(g_redis_use_ssl)
+		{
+		    opts.tls.enabled = true;
+		    if(!g_redis_ssl_cacert.empty())
+			opts.tls.cacert = g_redis_ssl_cacert;
+		}
 
 		auto redisSub = sw::redis::Redis(opts);
 		auto sub = redisSub.subscriber();

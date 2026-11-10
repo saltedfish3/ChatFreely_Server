@@ -72,8 +72,7 @@ if [ -f "ssl/server.crt" ] && [ -f "ssl/server.key" ]; then
     echo "   - 私钥路径: ssl/server.key"
     echo "   - 绑定域名/IP: ${SERVER_HOST}"
     echo ""
-    echo "请将 ssl/server.crt 与 ssl/server.key 拷贝到 /etc/nginx/ssl/，"
-    echo "然后执行：nginx -t && systemctl reload nginx"
+    echo "自签名证书已生成到 ssl/ 目录，请配置到 Nginx 或云 LB 使用"
 else
     echo " 证书生成失败，请检查 openssl 报错信息。"
     exit 1

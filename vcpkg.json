@@ -13,12 +13,17 @@
     "openssl",
     "zlib",
     "libsodium",
-    "hiredis",
-    "hiredis",
+    {
+      "name": "hiredis",
+      "features": [
+        "ssl"
+      ]
+    },
     {
       "name": "redis-plus-plus",
       "features": [
-        "cxx17"
+        "cxx17",
+        "tls"
       ]
     },
     {
