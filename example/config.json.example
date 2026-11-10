@@ -1,0 +1,5 @@
+{
+  "serverHost": "sh.example.com",
+  "tcpPort": 9443,
+  "useHttps": true
+}

@@ -1,0 +1,85 @@
+# -*- coding: utf-8 -*-
+# 腾讯云 SCF：按客户端地域返回最近入口
+# 触发器：API 网关 GET /config
+# 依赖：ip2region 离线库随函数包上传（建议用「层」管理）
+
+import json
+import logging
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# 地域 -> 入口域名
+REGION_MAP = {
+    "shanghai":  "sh.example.com",
+    "guangzhou": "gz.example.com",
+}
+DEFAULT_REGION = "shanghai"
+
+# 省份 -> 地域，按需补充
+PROVINCE_REGION = {
+    "上海": "shanghai", "江苏": "shanghai", "浙江": "shanghai",
+    "安徽": "shanghai", "福建": "shanghai", "江西": "shanghai",
+    "山东": "shanghai", "广东": "guangzhou", "广西": "guangzhou",
+    "海南": "guangzhou", "湖南": "guangzhou", "湖北": "guangzhou",
+}
+
+# 模块级初始化，利用实例复用避免每次调用都加载离线库
+_searcher = None
+
+def _get_searcher():
+    global _searcher
+    if _searcher is None:
+        import ip2region.searcher as xdb
+        _searcher = xdb.new_with_file_only(xdb.CITY, "ip2region.xdb")
+    return _searcher
+
+def _client_ip(event):
+    """优先从 X-Forwarded-For 取真实客户端 IP（挂 CDN 后 sourceIp 是 CDN 节点）"""
+    headers = event.get("headers") or {}
+    xff = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For") or ""
+    if xff:
+        ip = xff.split(",")[0].strip()
+        if ip:
+            return ip
+    return (event.get("requestContext") or {}).get("sourceIp", "")
+
+def _resolve_region(client_ip):
+    """IP -> 地域，任何异常都回落到默认地域"""
+    if not client_ip:
+        return DEFAULT_REGION
+    try:
+        region_text = _get_searcher().search(client_ip)  # 形如 "中国|0|上海|上海市|电信"
+        parts = region_text.split("|")
+        province = parts[2] if len(parts) > 2 else ""
+        return PROVINCE_REGION.get(province, DEFAULT_REGION)
+    except Exception as e:
+        logger.warning("ip2region failed: %s, ip=%s", e, client_ip)
+        return DEFAULT_REGION
+
+def main_handler(event, context):
+    if (event.get("httpMethod") or "GET").upper() != "GET":
+        return {
+            "isBase64Encoded": False,
+            "statusCode": 405,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "method not allowed"}),
+        }
+
+    region = _resolve_region(_client_ip(event))
+
+    body = {
+        "serverHost": REGION_MAP[region],
+        "tcpPort": 9443,
+        "useHttps": True,
+    }
+
+    return {
+        "isBase64Encoded": False,
+        "statusCode": 200,
+        "headers": {
+            "Content-Type": "application/json",
+            "Cache-Control": "public, max-age=300",
+        },
+        "body": json.dumps(body, ensure_ascii=False),
+    }

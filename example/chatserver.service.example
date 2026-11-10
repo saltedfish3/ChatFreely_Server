@@ -1,0 +1,17 @@
+[Unit]
+Description=ChatServer
+After=network.target
+
+[Service]
+Type=simple
+User=chat
+# 必须固定为仓库根目录，配置与密钥均按工作目录解析
+WorkingDirectory=/opt/ChatServer
+ExecStart=/opt/ChatServer/build/ChatServer
+# 长连接场景需要较高的文件描述符上限
+LimitNOFILE=100000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

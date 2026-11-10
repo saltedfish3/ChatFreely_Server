@@ -1,228 +1,81 @@
 # ChatServer 部署文档
 
-## 1. 架构与链路
+## 1. 架构
 
-ChatServer 采用全链路 TLS 加密设计，所有与客户端的通信均经过网关（Nginx 或云负载均衡）统一解密与转发。
+### 1.1 组件职责
 
-| 链路 | 客户端端口 | 网关转发目标 | 是否加密 |
-|---|---|---|---|
-| **客户端引导** | `443` (HTTPS) | 静态 JSON（见 2.2，可由任意托管服务下发） | 是 |
-| **TCP 长连接** | `9443` (TCP) | 各节点 `9002` | 是（TLS 终结后明文内网转发） |
-| **API 上传** | `443` (HTTPS) `/upload/` | 各节点 `9003` | 是（HTTPS） |
-| **下载 / 预览 / 大文件直传** | `443` (HTTPS) `/chat/` | MinIO `9000` | 是（HTTPS） |
-
-- **客户端引导机制**：客户端启动时先请求固定的引导地址获取一段静态 JSON
-  （`{"serverHost": "<域名>", "tcpPort": 9443, "useHttps": true}`），再据此建立长连接与 API 请求。
-  该接口不与后端交互，可由 Nginx 下发，也可由任意静态托管服务下发（见 2.2）。
-- **下载 / 直传共用 `/chat/` 路径**：图片/小文件下载（GET）与大文件分片直传（PUT，携带预签名 URL）
-  走同一条网关转发规则。这意味着**对象存储选型直接决定网关是否必须存在**（见 2.2）。
-- **传输能力现状**：上传方向支持分片断点续传；下载方向暂不支持断点续传
-  （网关已透传 `Range` 头、MinIO 原生支持 206 分片响应，客户端后续版本可启用），
-  当前大文件下载中断后需整体重新下载。
-- **缩略图生成**：由 ChatServer 内置的 stb 库在服务端生成并写回对象存储。
-- **服务启动依赖**：启动时检查 MySQL、Redis、MinIO 可达性，任一不可达直接退出。
-- **重要**：配置文件与 JWT 密钥均按**运行时工作目录**解析，请始终从仓库根目录启动，
-  或用 systemd 的 `WorkingDirectory` 固定（见第 9 节）。
-
-## 2. 部署模式总览
-
-| 模式 | 适用场景 | 说明 |
+| 组件 | 是否必需 | 作用 |
 |---|---|---|
-| **全自建单机** | 开发、演示、小规模 | MySQL / Redis / MinIO / Nginx 全部装在同一台机器，Nginx 必须 |
-| **云服务混合** | 生产环境推荐 | 存储层换云托管（RDS / 云 Redis / 云 OSS），Nginx 可选甚至可省 |
-| **多节点横向扩展** | 高可用 / 大规模 | 2+ 台应用节点共享同一套存储层，网关负载均衡 |
+| ChatServer | 必需 | 业务服务，对外提供 TCP 长连接（9002）与上传 API（9003） |
+| MySQL | 必需 | 用户、好友、群、消息等持久化数据 |
+| Redis | 必需 | 在线状态、跨节点消息路由、会话缓存 |
+| MinIO（或云 OSS） | 必需 | 图片、文件、视频等媒体存储 |
+| 网关 | 视情况 | TLS 终结与流量分发，可由 Nginx 或云 CLB 承担 |
 
-### 2.1 各组件：自建 vs 云服务对照
+### 1.2 两种部署形态
 
-| 组件 | 自建方式 | 可替换的云服务 | 迁移要点 |
-|---|---|---|---|
-| **MySQL** | 同机/独立机安装 MySQL | 阿里云 RDS、腾讯云 TDSQL-C、AWS RDS 等 | 把 `mysql_host/port/username/password/dbname` 指向实例即可；用 `schema.sql` 初始化一次表结构 |
-| **Redis** | 同机/独立机安装 Redis | 阿里云 Tair、腾讯云 Redis、AWS ElastiCache 等 | 指向实例地址并填密码；**若实例强制 TLS**，设 `redis_use_ssl = true` 并按需配置 `redis_ssl_cacert` |
-| **MinIO** | 安装 MinIO Server | 云托管 MinIO；其他 S3 兼容存储（COS/OSS/S3 兼容端点） | 见 2.2：自建 MinIO 时网关必须；云 OSS 时下载/直传可直接指向 CDN 域名。SDK 走 S3 兼容协议，第三方 S3 兼容存储理论可行但未逐一验证，生产建议自建 MinIO 或云托管 MinIO |
-| **Nginx** | 宿主机安装 nginx | 云 LB、API 网关、CDN 等，甚至可整体省略 | **是否必须取决于对象存储选型**，逐项替代方案见 **2.2** |
-
-### 2.2 网关（Nginx）是否必须：由对象存储选型决定
-
-Nginx 在本架构中承担 4 个独立职责，其中「下载/直传转发」这一项是否需要，
-**完全取决于你用自建 MinIO 还是云 OSS**：
-
-**情况 A：自建 MinIO（没有云 OSS）→ 网关必须**
-
-客户端所有媒体流量都是 HTTPS，而 MinIO 只监听明文 9000 端口，中间必须有 TLS 网关：
-
-- 下载/预览：客户端 GET `https://<域名>/chat/...` → 网关 → MinIO 9000
-- 大文件直传：客户端 PUT 预签名 URL（同为 `/chat/` 路径）→ 网关 → MinIO 9000
-
-两条流量均无法绕开网关。这是自建 MinIO 部署的默认形态，
-由于下载方向没有断点续传需求（见第 1 节），经网关一次性下载对体验影响可控。
-
-**情况 B：云 OSS（含 CDN 加速）→ 网关可选，媒体流量可整体旁路**
-
-把对象存储相关的两个配置指向云 OSS/CDN 域名即可：
-
-- `public_url_prefix = https://<OSS或CDN域名>/chat/`（下载流量直接走 CDN，不经网关）
-- 直传 PUT 同样指向 OSS 域名（由预签名 URL host 决定）
-
-此时网关只剩「TCP 9443 长连接」和「/upload/ API」两项职责，若这两项也交给云 LB，
-Nginx 可以完全不用。
-
-**各职责与云服务对照**（无论哪种情况，引导配置始终是静态 JSON，任意托管均可）：
-
-| # | Nginx 承担的职责 | 云服务替代方案 |
+| 形态 | 适用 | 网关 |
 |---|---|---|
-| 1 | `/config` 引导配置下发 | **任意静态文件托管**：对象存储静态网站（OSS/COS/S3）+ CDN、云函数（SCF/Lambda）、API 网关固定响应 |
-| 2 | `443` `/chat/` → MinIO（下载 GET + 直传 PUT） | 情况 A 用七层云 LB 转发；情况 B 直接旁路到 CDN/OSS 域名，网关不再承担此项 |
-| 3 | `443` `/upload/` → 节点 9003 | 七层云 LB 按路径转发、API 网关 |
-| 4 | `9443` TCP TLS 长连接 | 四层云 LB 的 TCP/TLS 监听器（TCPSSL），后端挂各节点 9002。**监听器空闲超时要大于客户端心跳间隔** |
-| 5 | `80 → 443` 跳转、TLS 证书 | 云 SSL 证书服务（免费证书 + 自动续期），LB 监听器直接挂证书 |
+| **单机自建** | 开发、演示、小规模 | 本机 Nginx |
+| **云上生产** | 正式环境 | Serverless 引导 + 各地域 CLB，业务节点全部私网 |
 
-**与多节点部署的关系**：引导下发的 `serverHost` 填网关（LB/域名）而非某个节点的 IP，
-客户端不需要知道节点列表——由 LB 决定连到哪台节点，跨节点消息由 Redis 路由。
-因此多节点扩缩容时，引导配置永远不用改。
+### 1.3 通用约定
 
->   无论 `/config` 由谁下发（Nginx 还是静态托管），JSON 里的 `serverHost`、`tcpPort`
-> 必须与实际网关监听器保持同步；对象存储选型切换时（A ↔ B），同步更新
-> `public_url_prefix` 与 `upload_public_host` 并重启服务端。
+- **必须从仓库根目录启动**：配置文件和 JWT 密钥均按运行时工作目录解析。用 systemd 时务必设置 `WorkingDirectory`。
+- **启动即检查依赖**：MySQL / Redis / MinIO 任一不可达，进程直接退出。
+- **媒体链路**：下载（GET）和大文件直传（PUT）共用 `/chat/` 路径。上传支持分片断点续传，**下载暂不支持断点续传**（网关已透传 `Range`，客户端后续版本可启用）。
 
-## 3. 编译安装（应用节点）
+---
 
-每台应用节点都需要编译（或编译一次后分发二进制，静态链接可直接拷贝 `build/ChatServer`）。
+## 2. 单机 / 自建部署
+
+### 2.1 编译
 
 ```bash
-# 3.1 系统依赖
+# 系统依赖
 sudo apt update
 sudo apt install -y build-essential cmake ninja-build git curl zip unzip tar \
     pkg-config autoconf automake autoconf-archive libtool libtool-bin bison flex \
     gperf gettext python3 perl rpcsvc-proto libtirpc-dev
 
-# 3.2 vcpkg（仅编译机需要；VCPKG_ROOT 默认 ~/vcpkg）
+# vcpkg（仅编译机需要，默认 ~/vcpkg）
 git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
 ~/vcpkg/bootstrap-vcpkg.sh
 
-# 3.3 编译
-cd ~/Desktop/ChatServer
+# 编译
+git clone https://gitee.com/saltedfish_mjc/chat-freely_-server.git ~/ChatServer
+cd ~/ChatServer
 make deps
 make -j$(nproc)
 ```
 
-> 国内网络 `make deps` 下载失败时：
+> `make deps` 下载失败（国内网络）：
 > `export VCPKG_ASSET_SOURCES="x-azurl,https://ghproxy.com/https://github.com"` 后重试。
 
-## 4. 数据库初始化（自建 MySQL 与云 RDS 通用）
+产物为 `build/ChatServer`，第三方库全部静态链接，可直接拷贝到同架构机器运行。
+
+### 2.2 初始化数据库
 
 ```bash
-mysql -h <MySQL地址> -u <用户名> -p <数据库名> < schema.sql
+mysql -h <地址> -u <用户名> -p <数据库名> < schema.sql
 ```
 
-## 5. TLS 证书
-
-将正式证书命名为 `server.crt` / `server.key`，供 Nginx（或云 LB 证书控制台）使用。
-
-没有正式证书时，可在仓库根目录运行 `./gen-cert.sh` 生成自签名测试证书（仅测试用，客户端需关闭证书校验）。
-
-## 6. JWT 密钥
+### 2.3 证书与密钥
 
 ```bash
+# 自签名测试证书（正式环境请换正式证书）
+./gen-cert.sh
+
+# JWT 密钥，整个集群只生成一次
 ./build/ChatServer --gen-jwt-secret ./secret/jwt_secret.key
+chmod 600 secret/jwt_secret.key
 ```
 
-**多节点部署时，所有节点必须使用同一份密钥文件**（见第 8 节），先分发再启动。
+### 2.4 配置
 
-## 7. 核心配置项说明
+首次运行自动生成 `config/ServerConfig.conf`，按第 5 节修改后重启。
 
-`config/ServerConfig.conf` 首次运行自动生成，关键项：
-
-| 配置项 | 含义 | 说明 |
-|---|---|---|
-| `node_id` | 节点唯一标识 | 格式必须为 `node_N`（N 取 1~32），**多节点时各不相同**；内部据此推导雪花算法 workerId，保证跨节点 ID 不冲突 |
-| `listen_port` / `upload_port` | TCP 长连接 / HTTP 上传端口 | 保持 `9002` / `9003` 不变 |
-| `mysql_*` | 数据库连接 | 自建填内网 IP，云 RDS 填实例连接地址 |
-| `redis_*` | Redis 连接 | 云 Redis 强制 TLS 时设 `redis_use_ssl = true`，`redis_ssl_cacert` 填 CA 证书路径（不校验可留空） |
-| `redis_connect_timeout` / `redis_socket_timeout` | Redis 超时（ms） | Redis 跨地域/走 TLS 时建议调大到 3000~5000 |
-| `minio_endpoint` | 对象存储 API 地址 | 服务端内网访问地址，如 `http://10.0.0.5:9000` 或云 OSS 内网 endpoint |
-| `public_url_prefix` | 下载 URL 前缀 | **情况 A（自建 MinIO）**：`https://<网关域名>/chat/`；**情况 B（云 OSS）**：`https://<OSS或CDN域名>/chat/`（**必须以 `/` 结尾**） |
-| `upload_public_host` | 直传对外地址 | 客户端直传 PUT 的目标 host：情况 A 填网关域名；情况 B 填 OSS bucket/CDN 域名。必须与预签名 URL 实际访问域名一致，否则直传报签名错误 |
-
-## 8. 多节点部署
-
-### 8.1 原理
-
-所有节点共享同一套 MySQL / Redis / 对象存储：
-
-- **在线状态**：用户连接时以 `SETNX(online_key, node_id, TTL)` 在 Redis 上登记所在节点。
-- **跨节点消息**：节点从 Redis 查到目标用户所在节点后，发布到 `channel:node:{node_id}`，目标节点订阅频道并推送给本机连接。
-- **ID 唯一性**：各节点按 `node_id` 推导雪花 workerId（`node_1→0`、`node_2→1`……），跨节点生成的消息 ID 永不冲突。
-- **幂等保障**：消息表对 `idempotent_key` 有唯一约束 + `INSERT IGNORE`，客户端重试落到任意节点都不会重复入库。
-
-### 8.2 部署步骤
-
-1. **分发 JWT 密钥（必须最先做）**
-
-   所有节点必须持有**同一份** `secret/jwt_secret.key`，否则 A 节点签发的 token 到 B 节点验签失败，
-   用户会被反复登出。在第一台节点上生成一次，然后分发到所有其他节点：
-
-   ```bash
-   # 在第一台节点上生成（整个集群只执行一次）
-   cd ~/Desktop/ChatServer
-   ./build/ChatServer --gen-jwt-secret ./secret/jwt_secret.key
-   chmod 600 secret/jwt_secret.key
-
-   # 分发到其余所有节点（nodeB/nodeC 替换为实际地址，路径保持一致）
-   scp secret/jwt_secret.key user@nodeB:~/Desktop/ChatServer/secret/
-   scp secret/jwt_secret.key user@nodeC:~/Desktop/ChatServer/secret/
-
-   # 校验各节点密钥一致（所有节点执行，输出应完全相同）
-   md5sum ~/Desktop/ChatServer/secret/jwt_secret.key
-   ```
-
-   >   顺序很重要：**先分发、再启动**。新节点在没有密钥文件时就启动，
-   > 会生成一把属于自己的新密钥——之后必须删掉重新分发，否则集群内 token 互验全部失败。
-
-2. **配置各节点 `config/ServerConfig.conf`**：`node_id` 分别设为 `node_1`、`node_2`……（1~32），其余存储相关配置保持一致。
-
-3. **网关负载均衡**（自建 Nginx 时，网关机上的 nginx.conf）：
-
-   ```nginx
-   stream {
-       upstream chat_tcp {
-           server 10.0.0.11:9002;
-           server 10.0.0.12:9002;
-       }
-       server {
-           listen 9443 ssl;
-           ssl_certificate     /etc/nginx/ssl/server.crt;
-           ssl_certificate_key /etc/nginx/ssl/server.key;
-           ssl_protocols TLSv1.2 TLSv1.3;
-           proxy_pass chat_tcp;
-       }
-   }
-   ```
-
-   HTTP 443 的 `/upload/`、`/chat/` 分流同理，把 `proxy_pass` 指向多台上游即可。
-   使用云 LB 时，在四层/TCPSSL 监听器后端挂多节点 9002 即可。
-
-4. **验证**：
-
-   ```bash
-   redis-cli pubsub channels
-   # 应同时看到 channel:node:node_1 与 channel:node:node_2
-
-   # 各节点启动日志应出现（workerId 各不相同）：
-   # Snowflake init: node_id=node_1, workerId=0
-   ```
-
-   然后用两个客户端分别连到不同节点，互发消息验证跨节点路由（登录一次后，
-   客户端重连到另一台节点不被要求重新登录，即密钥同步成功）。
-
-### 8.3 注意事项
-
-- `node_id` 一旦重复会导致消息路由错乱与在线锁互顶，务必唯一。
-- 密钥分发后各节点文件权限建议 600，且路径必须与各节点配置的 `jwt_secret_file` 一致。
-- 扩容上限为 32 个节点（雪花 workerId 5 bit）；如需更多，改用不同 datacenterid 组合。
-
-## 9. systemd 托管（推荐）
-
-配置与密钥按运行目录解析，必须用 `WorkingDirectory` 固定为仓库根目录：
+### 2.5 启动（systemd）
 
 ```ini
 # /etc/systemd/system/chatserver.service
@@ -235,6 +88,7 @@ Type=simple
 User=chat
 WorkingDirectory=/opt/ChatServer
 ExecStart=/opt/ChatServer/build/ChatServer
+LimitNOFILE=100000
 Restart=on-failure
 RestartSec=3
 
@@ -248,35 +102,221 @@ sudo systemctl enable --now chatserver
 journalctl -u chatserver -f
 ```
 
-## 10. 服务验证
+### 2.6 Nginx（单机形态）
 
-```bash
-# 进程与端口
-systemctl status chatserver
-ss -tlnp | grep -E '9002|9003'
+```nginx
+worker_rlimit_nofile 100000;
+events { worker_connections 65535; }
 
-# 引导配置下发
-curl -k https://<你的域名>/config
+http {
+    client_max_body_size 2g;
+    server {
+        listen 443 ssl;
+        ssl_certificate     /etc/nginx/ssl/server.crt;
+        ssl_certificate_key /etc/nginx/ssl/server.key;
 
-# 媒体下载（经网关或 CDN，视对象存储选型而定）
-curl -k -I https://<你的域名>/chat/images/xxxx.jpg
+        location /chat/   { proxy_pass http://127.0.0.1:9000/chat/; proxy_set_header Host $host; proxy_buffering off; }
+        location /upload/ { proxy_pass http://127.0.0.1:9003/upload/; proxy_request_buffering off; proxy_read_timeout 300s; }
+        location = /config {
+            default_type application/json;
+            return 200 '{"serverHost":"<你的域名>","tcpPort":9443,"useHttps":true}';
+        }
+    }
+}
 
-# TCP 长连接：客户端连接 9443，服务端日志出现 Client Connect 即链路正常
+stream {
+    server {
+        listen 9443 ssl;
+        ssl_certificate     /etc/nginx/ssl/server.crt;
+        ssl_certificate_key /etc/nginx/ssl/server.key;
+        proxy_pass 127.0.0.1:9002;
+        proxy_timeout 24h;
+    }
+}
 ```
 
-## 11. 故障排查
+---
 
-| 现象 | 可能原因 | 处理方式 |
+## 3. 云上生产架构
+
+### 3.1 三层收敛
+
+```
+① GET https://api.example.com/config
+        → CDN → API 网关 → SCF（按客户端 IP 判定地域）
+        ← {"serverHost":"sh.example.com","tcpPort":9443,"useHttps":true}
+
+② 客户端连 sh.example.com:9443
+        → 该地域 CLB（TLS 终结 + 健康检查 + 负载均衡）
+        → 私网节点 10.0.1.11~13:9002 / 9003
+
+③ 媒体流量：/chat/ → 云 OSS + CDN（不由 CLB 承担）
+```
+
+| 层 | 组件 | 公网 | 职责 |
+|---|---|---|---|
+| 引导 | CDN + API 网关 + SCF | ✅ | 判地域、下发最近入口 |
+| 接入 | 每地域 1 个 CLB | ✅ | TLS 终结、节点负载均衡 |
+| 计算 | ChatServer 节点 × N | ❌ 私网 | 业务与长连接 |
+| 存储 | MySQL / Redis / MinIO | ❌ 私网 | 共享状态 |
+
+**收益**：对外只有引导层和各地域 CLB 两个入口，节点、数据库、存储均不可从公网触达。
+
+### 3.2 引导层：`/config` 下发
+
+SCF 逻辑只需地域映射，不需要维护单机心跳：
+
+```python
+REGION_MAP = {"shanghai": "sh.example.com", "guangzhou": "gz.example.com"}
+
+def main(event):
+    province = ip2region(event["sourceIp"])       # 离线库，打进函数包
+    region   = "shanghai" if province in SH else "guangzhou"
+    return {"serverHost": REGION_MAP[region], "tcpPort": 9443, "useHttps": True}
+```
+
+**必须给 `/config` 挂 CDN 缓存**（TTL 1~10 分钟）。该接口返回内容静态，缓存后攻击流量在边缘被吸收，既扛打又省函数调用费。
+
+### 3.3 接入层：CLB
+
+- **四层 TCP SSL 监听器**：9443，后端挂本地域各节点 9002
+- **七层 HTTPS 监听器**：443，按路径转发 `/upload/` → 9003、`/chat/` → 对象存储内网地址
+- 节点挂掉由 CLB 健康检查自动摘除
+
+### 3.4 四项注意
+
+1. **CLB 规格看并发连接数**，不是 QPS。长连接常驻，峰值 3 万在线就需 3 万并发连接，选规格时按此估算并预留余量。
+2. **四层空闲超时必须大于客户端心跳间隔**，否则 CLB 静默断开长连接，表现为“莫名掉线”。
+3. **后端节点分布在至少两个可用区**，避免单可用区故障导致 CLB 存活但后端全挂。
+4. **客户端必须实现回落**：连接入口失败时重新请求 `/config`，由 SCF 导向其他地域，实现自愈。
+
+---
+
+## 4. 多节点部署
+
+### 4.1 原理
+
+所有节点共享同一套 MySQL / Redis / 对象存储，本身无状态：
+
+| 机制 | 实现 |
+|---|---|
+| 在线状态 | 用户连接时 `SETNX(online_key, node_id, TTL)` 登记所在节点 |
+| 跨节点消息 | 查得目标节点后发布到 `channel:node:{node_id}`，目标节点订阅并推送 |
+| ID 唯一 | 按 `node_id` 推导雪花 workerId（`node_1→0`、`node_2→1`），跨节点不冲突 |
+| 幂等 | 消息表 `idempotent_key` 唯一约束 + `INSERT IGNORE`，重试不重复入库 |
+
+### 4.2 步骤
+
+**① 分发 JWT 密钥（最先做）**
+
+```bash
+# 整个集群只生成一次
+./build/ChatServer --gen-jwt-secret ./secret/jwt_secret.key
+
+# 分发到其他所有节点
+scp secret/jwt_secret.key user@nodeB:~/ChatServer/secret/
+
+# 各节点校验一致（输出应完全相同）
+md5sum ~/ChatServer/secret/jwt_secret.key
+```
+
+> ⚠️ 必须先分发再启动。新节点若先启动会自行生成不同密钥，之后集群内 token 互验全部失败。
+
+**② 配置 `node_id`**
+
+各节点 `config/ServerConfig.conf` 中 `node_id` 依次设为 `node_1`、`node_2`……（取值 1~32），其余存储配置保持一致。
+
+**③ 入口负载均衡**
+
+云上由地域 CLB 后端挂全部节点；自建用 Nginx：
+
+```nginx
+stream {
+    upstream chat_tcp {
+        least_conn;
+        server 10.0.1.11:9002;
+        server 10.0.1.12:9002;
+    }
+    server {
+        listen 9443 ssl;
+        ssl_certificate     /etc/nginx/ssl/server.crt;
+        ssl_certificate_key /etc/nginx/ssl/server.key;
+        proxy_pass chat_tcp;
+        proxy_timeout 24h;
+    }
+}
+```
+
+### 4.3 验证
+
+```bash
+# 各节点频道都在（说明订阅正常）
+redis-cli pubsub channels
+# 期望：channel:node:node_1、channel:node:node_2
+
+# 各节点启动日志 workerId 不同
+# Snowflake init: node_id=node_1, workerId=0
+# Snowflake init: node_id=node_2, workerId=1
+
+# 跨节点验收：客户端 A 连 node_1、客户端 B 连 node_2，互发消息能收到；
+# 登录后重连到另一节点无需重新登录（证明密钥同步成功）
+```
+
+### 4.4 约束
+
+- `node_id` 重复会导致消息路由错乱、在线锁互顶，务必唯一。
+- 各节点需 NTP 时间同步，雪花 ID 依赖时钟单调。
+- 集群上限 32 节点（workerId 占 5 bit）。
+
+---
+
+## 5. 配置项
+
+`config/ServerConfig.conf`：
+
+| 配置项 | 说明 |
+|---|---|
+| `node_id` | 节点标识，格式 `node_N`（1~32），多节点时各不相同 |
+| `listen_port` / `upload_port` | TCP 长连接 / 上传端口，默认 9002 / 9003 |
+| `jwt_secret_file` | 密钥路径，多节点必须指向同一份内容 |
+| `mysql_host/port/username/password/dbname` | 数据库连接，云 RDS 填实例地址 |
+| `redis_host/port/password` | Redis 连接 |
+| `redis_use_ssl` | 云 Redis 强制 TLS 时设 `true` |
+| `redis_ssl_cacert` | CA 证书路径，不校验可留空 |
+| `redis_connect_timeout` / `redis_socket_timeout` | 单位 ms；走 TLS 或跨地域建议调至 3000~5000 |
+| `minio_endpoint` | 服务端访问存储的内网地址 |
+| `minio_access_key/secret_key/bucket` | 存储凭据与桶名 |
+| `public_url_prefix` | 下载 URL 前缀，客户端可达地址，**必须以 `/` 结尾** |
+| `upload_public_host` | 直传 PUT 的目标域名，必须与预签名 URL 实际访问域名一致 |
+
+> **自建 MinIO**：`public_url_prefix` 填网关域名，网关必须转发 `/chat/` 到 MinIO 9000。
+> **云 OSS**：`public_url_prefix` 直接填 OSS/CDN 域名，媒体流量旁路网关。
+
+---
+
+## 6. 运维
+
+### 6.1 健康检查
+
+```bash
+systemctl status chatserver
+ss -tlnp | grep -E '9002|9003'
+curl -k https://<域名>/config
+curl -k -I https://<域名>/chat/images/xxx.jpg
+```
+
+### 6.2 故障排查
+
+| 现象 | 原因 | 处理 |
 |---|---|---|
-| `make deps` 下载失败 | 网络无法访问 GitHub | `export VCPKG_ASSET_SOURCES="x-azurl,https://ghproxy.com/https://github.com"` 后重试 |
-| 启动报 MySQL/Redis/MinIO unreachable | 地址或安全组不通 | 先 `telnet <host> <port>` 验证连通性，再查密码 |
-| Redis 连接报 TLS 相关错误 | 云实例强制 TLS 但未开启客户端 SSL | `redis_use_ssl = true`，按云厂商文档配置 CA 证书 |
-| 客户端连 9443 被拒 | Nginx stream 块未生效 | stream 块必须位于 nginx.conf 主配置层（不能放进 http{}），`nginx -t` 检查 |
-| 上传/下载 502 | 后端节点 9003 / MinIO 9000 不可达 | 检查进程存活与网关转发目标 |
-| 图片上传成功但无法预览 | `public_url_prefix` 配置错 | 必须为 `https://<域名>/chat/` 且以 `/` 结尾 |
-| 直传 PUT 报 403 / SignatureDoesNotMatch | `upload_public_host` 与实际访问域名不一致 | 二者保持一致；网关转发 `/chat/` 时不得改写 Host 头（`proxy_set_header Host $host`） |
-| 下载 404 或签名过期 | 预签名 URL 超过有效期 | 重新获取，检查客户端与服务器时间同步 |
-| 大文件直传失败 | 网关请求体限制或缓冲 | `client_max_body_size` 调大（示例为 2g）；`/chat/` 建议加 `proxy_request_buffering off` 流式转发 |
-| 多节点互发消息收不到 | `node_id` 重复或未订阅 | `redis-cli pubsub channels` 核对各节点频道；确认 node_id 唯一 |
-| 跨节点消息 ID 冲突 | 启动日志未见 Snowflake init | 确认代码含 `sfGen.init` 逻辑，node_id 格式为 `node_N` |
-| 客户端报 token 校验失败 | 多节点 JWT 密钥不一致 | 重新分发同一份 `jwt_secret.key` 并重启所有节点 |
+| `make deps` 失败 | 无法访问 GitHub | 设置 `VCPKG_ASSET_SOURCES` 镜像后重试 |
+| 启动报依赖不可达 | 地址错误或安全组未放行 | `telnet <host> <port>` 验证，再查密码 |
+| Redis 报 TLS 错误 | 云实例强制 TLS | `redis_use_ssl = true` 并配置 CA |
+| 9443 连不上 | Nginx 未启动 / stream 块位置错 | stream 块必须在主配置层，不能放进 http{} |
+| 上传下载 502 | 后端 9003 / 9000 不可达 | 检查进程与转发目标 |
+| 图片无法预览 | `public_url_prefix` 错误 | 必须 `https://<域名>/chat/`，末尾带 `/` |
+| 直传报 403 | Host 与签名域名不一致 | `upload_public_host` 与访问域名对齐；网关不得改写 Host |
+| 长连接异常掉线 | 入口空闲超时小于心跳 | 调大 CLB 空闲超时或 Nginx `proxy_timeout` |
+| 跨节点消息收不到 | `node_id` 重复 | 核对各节点频道与 `node_id` 唯一性 |
+| 跨节点 ID 冲突 | 未初始化雪花 workerId | 确认启动日志有 `Snowflake init` |
+| 客户端 token 校验失败 | 多节点密钥不一致 | 重新分发同一份密钥并重启 |
