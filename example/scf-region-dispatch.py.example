@@ -1,43 +1,67 @@
 # -*- coding: utf-8 -*-
-# 腾讯云 SCF：按客户端地域返回最近入口
+# 腾讯云 SCF：按客户端地域返回最近接入入口
+#
 # 触发器：API 网关 GET /config
-# 依赖：ip2region 离线库随函数包上传（建议用「层」管理）
+# 运行环境：Python 3.10
+# 执行方法：index.main_handler
+#
+# 依赖（与 index.py 同级放置）：
+#   pip install py-ip2region -t .     # 注意包名是 py-ip2region，import 名是 ip2region
+#   ip2region_v4.xdb                  # 离线库，约 10.6MB
+#
+# 客户端调用：GET https://api.chatfreely.cloud/config
+# 返回示例：{"serverHost":"gz.chatfreely.cloud","tcpPort":9443,"useHttps":true}
 
+import os
 import json
 import logging
+
+import ip2region.util as iutil
+import ip2region.searcher as xdb
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# 地域 -> 入口域名
+# ---------- 地域配置 ----------
+# 地域 key -> 该地域的接入域名
 REGION_MAP = {
-    "shanghai":  "sh.example.com",
-    "guangzhou": "gz.example.com",
+    "guangzhou": "gz.chatfreely.cloud",
 }
-DEFAULT_REGION = "shanghai"
 
-# 省份 -> 地域，按需补充
+# 无法判断地域时的兜底
+DEFAULT_REGION = "guangzhou"
+
+# 省份 -> 地域
+# 目前只有广州一个节点，保留一条作示例；其他省份都会回落到 DEFAULT_REGION。
+# 新增上海节点时，按下面的写法补充即可，无需改动其他代码：
+#   REGION_MAP["shanghai"] = "sh.chatfreely.cloud"
+#   PROVINCE_REGION.update({
+#       "上海": "shanghai", "江苏": "shanghai", "浙江": "shanghai",
+#       "安徽": "shanghai", "福建": "shanghai", "江西": "shanghai",
+#       "山东": "shanghai",
+#   })
 PROVINCE_REGION = {
-    "上海": "shanghai", "江苏": "shanghai", "浙江": "shanghai",
-    "安徽": "shanghai", "福建": "shanghai", "江西": "shanghai",
-    "山东": "shanghai", "广东": "guangzhou", "广西": "guangzhou",
-    "海南": "guangzhou", "湖南": "guangzhou", "湖北": "guangzhou",
+    "广东": "guangzhou",
 }
 
-# 模块级初始化，利用实例复用避免每次调用都加载离线库
+# ---------- 离线库 ----------
+# 用 __file__ 定位，避免依赖进程工作目录
+_XDB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ip2region_v4.xdb")
+
 _searcher = None
 
 def _get_searcher():
+    """模块级缓存，实例复用时避免重复加载离线库"""
     global _searcher
     if _searcher is None:
-        import ip2region.searcher as xdb
-        _searcher = xdb.new_with_file_only(xdb.CITY, "ip2region.xdb")
+        _searcher = xdb.new_with_file_only(iutil.IPv4, _XDB_PATH)
     return _searcher
 
+# ---------- 工具函数 ----------
 def _client_ip(event):
-    """优先从 X-Forwarded-For 取真实客户端 IP（挂 CDN 后 sourceIp 是 CDN 节点）"""
-    headers = event.get("headers") or {}
-    xff = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For") or ""
+    """优先取 X-Forwarded-For；挂了 CDN 后 sourceIp 会是 CDN 节点 IP"""
+    headers = {str(k).lower(): v for k, v in (event.get("headers") or {}).items()}
+    xff = headers.get("x-forwarded-for") or ""
     if xff:
         ip = xff.split(",")[0].strip()
         if ip:
@@ -49,14 +73,19 @@ def _resolve_region(client_ip):
     if not client_ip:
         return DEFAULT_REGION
     try:
-        region_text = _get_searcher().search(client_ip)  # 形如 "中国|0|上海|上海市|电信"
+        # py-ip2region 3.x 返回 "中国|广东省|深圳市|电信|CN"
+        region_text = _get_searcher().search(client_ip)
         parts = region_text.split("|")
-        province = parts[2] if len(parts) > 2 else ""
-        return PROVINCE_REGION.get(province, DEFAULT_REGION)
+        province = parts[1] if len(parts) > 1 else ""
+        # 包含匹配，兼容 "广东" / "广东省"
+        for name, region in PROVINCE_REGION.items():
+            if name in province:
+                return region
     except Exception as e:
         logger.warning("ip2region failed: %s, ip=%s", e, client_ip)
-        return DEFAULT_REGION
+    return DEFAULT_REGION
 
+# ---------- 入口 ----------
 def main_handler(event, context):
     if (event.get("httpMethod") or "GET").upper() != "GET":
         return {
@@ -66,7 +95,9 @@ def main_handler(event, context):
             "body": json.dumps({"error": "method not allowed"}),
         }
 
-    region = _resolve_region(_client_ip(event))
+    client_ip = _client_ip(event)
+    region = _resolve_region(client_ip)
+    logger.info("client_ip=%s -> region=%s", client_ip, region)
 
     body = {
         "serverHost": REGION_MAP[region],
@@ -79,7 +110,8 @@ def main_handler(event, context):
         "statusCode": 200,
         "headers": {
             "Content-Type": "application/json",
-            "Cache-Control": "public, max-age=300",
+            # 返回内容随客户端 IP 变化，禁止公开缓存，否则会串地域
+            "Cache-Control": "no-store",
         },
         "body": json.dumps(body, ensure_ascii=False),
     }
