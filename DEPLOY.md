@@ -56,9 +56,24 @@ make -j$(nproc)
 
 ### 2.2 初始化数据库
 
-```bash
-mysql -h <地址> -u <用户名> -p <数据库名> < schema.sql
+```sql
+-- 建库建表（root 执行一次）
+source schema.sql;
+
+-- 应用账号：只给 DML，不给 DDL
+CREATE USER 'chatserver'@'10.1.0.15'
+  IDENTIFIED WITH mysql_native_password BY '<强随机密码>';
+GRANT SELECT, INSERT, UPDATE, DELETE ON ChatFreely.* TO 'chatserver'@'10.1.0.15';
 ```
+
+注意三点：
+
+1. **必须用 `mysql_native_password`**。代码建连时 `clientFlag = 0`，
+   不开 TLS 也不取服务端公钥，MySQL 8.0 默认的 `caching_sha2_password`
+   会报 `Authentication requires secure connection`。
+2. **库名是 `ChatFreely`**，Linux 上大小写敏感，配 `chatfreely` 会
+   `Unknown database`。
+3. `@host` 填 **ChatServer 自己的网段**，不是数据库所在网段。
 
 ### 2.3 证书与密钥
 
@@ -74,6 +89,15 @@ chmod 600 secret/jwt_secret.key
 ### 2.4 配置
 
 首次运行自动生成 `config/ServerConfig.conf`，按第 5 节修改后重启。
+
+配置注意：
+
+- `redis_ssl_cacert` 是**相对进程工作目录**解析的，建议写绝对路径
+  （`/opt/ChatServer/ssl/ca.pem`）。
+- `public_url_prefix` / `upload_public_host` 会**直接返回给客户端**，
+  必须是对外可访问的域名，不能是 `127.0.0.1`。
+- Redis 只有一个 `redis_password`，**没有用户名**：客户端以 `default`
+  用户认证，不需要也不能配置 ACL 账号。
 
 ### 2.5 启动（systemd）
 
@@ -164,16 +188,26 @@ stream {
 
 ### 3.2 引导层：`/config` 下发
 
-SCF 逻辑只需地域映射，不需要维护单机心跳：
+依赖（与 `index.py` 同级）：
+
+```bash
+pip install py-ip2region -t .   # 包名是 py-ip2region，import 名是 ip2region
+# 另需 ip2region_v4.xdb（约 10.6MB）
+```
 
 ```python
-REGION_MAP = {"shanghai": "sh.example.com", "guangzhou": "gz.example.com"}
+import ip2region.util as iutil
+import ip2region.searcher as xdb
 
-def main(event):
-    province = ip2region(event["sourceIp"])       # 离线库，打进函数包
-    region   = "shanghai" if province in SH else "guangzhou"
-    return {"serverHost": REGION_MAP[region], "tcpPort": 9443, "useHttps": True}
+_searcher = xdb.new_with_file_only(iutil.IPv4, "ip2region_v4.xdb")
+region = _searcher.search(ip)        # 中国|广东省|深圳市|电信|CN
+province = region.split("|")[1]      # v3 省份在 [1]，v2 才是 [2]
 ```
+
+返回头必须带 `Cache-Control: no-store` —— 结果随客户端 IP 变化，
+公开缓存会让不同用户拿到同一个地域。
+
+完整可运行示例见 `example/scf-region-dispatch.py.example`。
 
 **必须给 `/config` 挂 CDN 缓存**（TTL 1~10 分钟）。该接口返回内容静态，缓存后攻击流量在边缘被吸收，既扛打又省函数调用费。
 
@@ -191,6 +225,20 @@ def main(event):
 4. **客户端必须实现回落**：连接入口失败时重新请求 `/config`，由 SCF 导向其他地域，实现自愈。
 
 ---
+
+### 3.5 域名规划
+
+| 域名 | 用途 | 记录类型 | 指向 |
+|---|---|---|---|
+| `api.example.com` | `/config` 引导 | CNAME | API 网关服务域名 |
+| `gz.example.com` | 地域接入 | A | 该地域 CLB 的 VIP |
+| `cdn.example.com` | 文件下载 | CNAME | CDN 加速域名 |
+
+- **CVM 不应出现在任何 DNS 记录里**，它只作为 CLB 后端。
+- 解析到大陆 IP 的域名必须先完成 ICP 备案，否则 80/443 被拦截。
+- API 网关绑定自定义域名同样要求域名已备案。
+- MinIO/COS 的真实域名会出现在预签名直传 URL 中，无法用 CDN 隐藏
+  （S3 V4 签名绑定 Host），如需全隐藏要给 bucket 绑自定义域名。
 
 ## 4. 多节点部署
 
