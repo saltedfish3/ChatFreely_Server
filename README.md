@@ -74,3 +74,14 @@ mysql -h <MySQL地址> -u <用户名> -p <数据库名> < schema.sql
 ## 文档
 
 **详细的部署模式（自建 / 云服务混合 / 多节点）、Nginx 配置、systemd 托管及故障排查，请参阅 [DEPLOY.md](DEPLOY.md)。**
+
+## 许可证
+
+本项目采用 GNU General Public License v3.0，详见 [LICENSE](LICENSE)。
+
+本项目使用的第三方开源组件：
+
+- nlohmann/json — MIT License
+- stb_image — Public Domain / MIT License
+- Snowflake ID 实现 — 见 third_party 目录内原始声明
+- MySQL Connector/C — GPLv2 + FOSS Exception
